@@ -65,6 +65,16 @@ function resolvePath(p: string): string {
   return path.resolve(workspaceDir, p);
 }
 
+async function downloadTelegramPhoto(fileId: string): Promise<{ base64: string; mime: string; ext: string }> {
+  const fileLink = await bot.getFileLink(fileId);
+  const resp = await fetch(fileLink);
+  const buffer = Buffer.from(await resp.arrayBuffer());
+  const ext = path.extname(new URL(fileLink).pathname).slice(1) || 'jpg';
+  const mimeMap: Record<string, string> = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp' };
+  const mime = mimeMap[ext] || 'image/jpeg';
+  return { base64: buffer.toString('base64'), mime, ext };
+}
+
 function splitMessage(text: string, limit = 4000): string[] {
   if (text.length <= limit) return [text];
   const chunks: string[] = [];
@@ -129,9 +139,18 @@ function loadHistory(chatId: string, maxMessages = 50): Anthropic.MessageParam[]
     }
   }
 
-  // Must start with user
-  while (cleaned.length > 0 && cleaned[0].role !== 'user') {
-    cleaned.shift();
+  // Must start with user, and first user message must not have orphaned tool_results
+  while (cleaned.length > 0) {
+    const first = cleaned[0];
+    if (first.role !== 'user') {
+      cleaned.shift();
+      continue;
+    }
+    if (Array.isArray(first.content) && first.content.some((b: any) => b.type === 'tool_result')) {
+      cleaned.shift();
+      continue;
+    }
+    break;
   }
 
   return cleaned;
@@ -436,7 +455,7 @@ function getNextCronRun(cronExpr: string): Date {
 
 // ── Agent Loop ────────────────────────────────────────────────────────
 
-async function runAgentLoop(chatId: string, userMessage: string): Promise<string> {
+async function runAgentLoop(chatId: string, userMessage: string | Anthropic.ContentBlockParam[], saveAs?: string): Promise<string> {
   const history = loadHistory(chatId);
 
   const messages: Anthropic.MessageParam[] = [
@@ -444,7 +463,7 @@ async function runAgentLoop(chatId: string, userMessage: string): Promise<string
     { role: 'user', content: userMessage },
   ];
 
-  saveMessage(chatId, 'user', userMessage);
+  saveMessage(chatId, 'user', saveAs ?? userMessage);
 
   let iterations = 0;
   while (iterations < CONFIG.MAX_TOOL_ITERATIONS) {
@@ -530,6 +549,42 @@ bot.on('message', async (msg) => {
   if (String(msg.from?.id) !== CONFIG.ALLOWED_USER_ID) return;
 
   const chatId = String(msg.chat.id);
+
+  // Handle photos
+  if (msg.photo && msg.photo.length > 0) {
+    const photo = msg.photo[msg.photo.length - 1]; // largest resolution
+    const caption = msg.caption || "What's in this image?";
+
+    bot.sendChatAction(msg.chat.id, 'typing').catch(() => {});
+
+    try {
+      const { base64, mime, ext } = await downloadTelegramPhoto(photo.file_id);
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const filename = `${timestamp}-${photo.file_unique_id}.${ext}`;
+      const imagesDir = path.join(workspaceDir, 'images');
+      fs.mkdirSync(imagesDir, { recursive: true });
+      fs.writeFileSync(path.join(imagesDir, filename), Buffer.from(base64, 'base64'));
+
+      const contentBlocks: Anthropic.ContentBlockParam[] = [
+        { type: 'image', source: { type: 'base64', media_type: mime as 'image/jpeg', data: base64 } },
+        { type: 'text', text: caption },
+      ];
+      const saveAs = `[Image: workspace/images/${filename}] ${caption}`;
+
+      const response = await runAgentLoop(chatId, contentBlocks, saveAs);
+      const chunks = splitMessage(response);
+      for (const chunk of chunks) {
+        await bot.sendMessage(msg.chat.id, chunk, { parse_mode: 'Markdown' }).catch(() =>
+          bot.sendMessage(msg.chat.id, chunk)
+        );
+      }
+    } catch (err: any) {
+      console.error('[error] photo handling:', err);
+      await bot.sendMessage(msg.chat.id, `❌ Error processing image: ${err.message}`);
+    }
+    return;
+  }
+
   const text = msg.text;
   if (!text) return;
 
