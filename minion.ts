@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import Anthropic from '@anthropic-ai/sdk';
 import Database from 'better-sqlite3';
 import TelegramBot from 'node-telegram-bot-api';
@@ -266,7 +267,7 @@ async function executeTool(name: string, input: Record<string, unknown>, chatId:
             timeout: timeout_seconds * 1000,
             maxBuffer: 1024 * 1024,
             encoding: 'utf-8',
-            env: { ...process.env, PATH: `/opt/homebrew/bin:/usr/local/bin:${process.env.PATH}` },
+            env: { ...process.env, PATH: `${process.env.HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:${process.env.PATH}` },
           });
           return { stdout: stdout.slice(0, 50000), stderr: '', exit_code: 0 };
         } catch (err: any) {
@@ -334,12 +335,12 @@ async function executeTool(name: string, input: Record<string, unknown>, chatId:
         const cwd = working_directory ? path.resolve(working_directory) : workspaceDir;
         try {
           const escaped = prompt.replace(/'/g, "'\\''");
-          const output = execSync(`claude -p '${escaped}' --output-format stream-json`, {
+          const output = execSync(`claude -p '${escaped}' --verbose --output-format stream-json`, {
             cwd,
             timeout: 300_000,
             maxBuffer: 10 * 1024 * 1024,
             encoding: 'utf-8',
-            env: { ...process.env, PATH: `/opt/homebrew/bin:/usr/local/bin:${process.env.PATH}` },
+            env: { ...process.env, PATH: `${process.env.HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:${process.env.PATH}` },
           });
           // Parse stream-json: each line is a JSON object, extract result text from the last "result" message
           const lines = output.trim().split('\n');
