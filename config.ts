@@ -1,0 +1,12 @@
+export const CONFIG = {
+  ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY!,
+  TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN!,
+  ALLOWED_USER_ID: process.env.TELEGRAM_USER_ID!,
+  MODEL: 'claude-sonnet-4-5-20250929',
+  OPUS_MODEL: 'claude-opus-4-6-20250918',
+  MAX_TOOL_ITERATIONS: 25,
+  WORKSPACE_DIR: './workspace',
+  MEMORY_FILE: './MEMORY.md',
+  DB_PATH: './data/minion.db',
+  SYSTEM_PROMPT_FILE: './SYSTEM_PROMPT.md',
+} as const;
