@@ -71,7 +71,7 @@ minion/
 
 ## Tools
 
-The agent has 9 tools available:
+The agent has 10 tools available:
 
 | Tool | Description |
 |------|-------------|
@@ -84,6 +84,7 @@ The agent has 9 tools available:
 | `claude_code` | Delegate to Claude Code CLI for complex multi-step tasks (5 min timeout) |
 | `schedule_task` | Create, list, or remove cron-scheduled tasks |
 | `think_hard` | Send a question to Opus with extended thinking for hard reasoning |
+| `twitter` | Read tweets, view user timelines, or search recent X/Twitter posts |
 
 ### claude_code
 
@@ -151,6 +152,7 @@ All configuration is in `config.ts` via environment variables:
 | `ANTHROPIC_API_KEY` | Anthropic API key |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token from BotFather |
 | `TELEGRAM_USER_ID` | Your Telegram user ID (only this user gets responses) |
+| `X_BEARER_TOKEN` | X/Twitter API bearer token (optional, for twitter tool) |
 
 Other constants in `config.ts`:
 

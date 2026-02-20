@@ -265,6 +265,21 @@ const TOOLS: Anthropic.Tool[] = [
       required: ['question'],
     },
   },
+  {
+    name: 'twitter',
+    description: 'Read tweets, view user timelines, or search X/Twitter. Use read_tweet to fetch a specific tweet by URL or ID. Use user_timeline to get recent tweets from a user. Use search to find recent tweets.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        action: { type: 'string', enum: ['read_tweet', 'user_timeline', 'search'], description: 'Action to perform' },
+        tweet_id: { type: 'string', description: 'Tweet ID or full URL (for read_tweet)' },
+        username: { type: 'string', description: 'X/Twitter username without @ (for user_timeline)' },
+        query: { type: 'string', description: 'Search query (for search)' },
+        max_results: { type: 'number', description: 'Max results 10-100 (default 10, for search)' },
+      },
+      required: ['action'],
+    },
+  },
 ];
 
 // ── Tool Execution ────────────────────────────────────────────────────
@@ -438,6 +453,74 @@ async function executeTool(name: string, input: Record<string, unknown>, chatId:
           if (block.type === 'text') answer += block.text;
         }
         return { reasoning: reasoning.slice(0, 5000), answer };
+      }
+
+      case 'twitter': {
+        if (!CONFIG.X_BEARER_TOKEN) {
+          return { error: 'X_BEARER_TOKEN not configured in .env' };
+        }
+        const { action, tweet_id, username, query, max_results = 10 } = input as {
+          action: 'read_tweet' | 'user_timeline' | 'search';
+          tweet_id?: string;
+          username?: string;
+          query?: string;
+          max_results?: number;
+        };
+
+        const tweetFields = 'text,author_id,created_at,public_metrics';
+        const expansions = 'author_id';
+        const userFields = 'username,name';
+
+        const xFetch = async (endpoint: string) => {
+          const resp = await fetch(`https://api.x.com/2${endpoint}`, {
+            headers: { Authorization: `Bearer ${CONFIG.X_BEARER_TOKEN}` },
+          });
+          if (!resp.ok) {
+            const body = await resp.text();
+            return { error: `X API ${resp.status}: ${body.slice(0, 1000)}` };
+          }
+          return resp.json();
+        };
+
+        if (action === 'read_tweet') {
+          if (!tweet_id) return { error: 'tweet_id is required for read_tweet' };
+          const id = tweet_id.match(/status\/(\d+)/)?.[1] || tweet_id;
+          const data = await xFetch(`/tweets/${id}?tweet.fields=${tweetFields}&expansions=${expansions}&user.fields=${userFields}`);
+          return data;
+        }
+
+        if (action === 'user_timeline') {
+          if (!username) return { error: 'username is required for user_timeline' };
+          const userResp = await xFetch(`/users/by/username/${encodeURIComponent(username)}`);
+          if (userResp.error) return userResp;
+          const userId = userResp.data?.id;
+          if (!userId) return { error: `User not found: ${username}` };
+          const n = Math.min(Math.max(max_results, 5), 100);
+          const params = new URLSearchParams({
+            max_results: String(n),
+            'tweet.fields': tweetFields,
+            expansions,
+            'user.fields': userFields,
+          });
+          const data = await xFetch(`/users/${userId}/tweets?${params}`);
+          return data;
+        }
+
+        if (action === 'search') {
+          if (!query) return { error: 'query is required for search' };
+          const n = Math.min(Math.max(max_results, 10), 100);
+          const params = new URLSearchParams({
+            query,
+            max_results: String(n),
+            'tweet.fields': tweetFields,
+            expansions,
+            'user.fields': userFields,
+          });
+          const data = await xFetch(`/tweets/search/recent?${params}`);
+          return data;
+        }
+
+        return { error: `Unknown twitter action: ${action}` };
       }
 
       default:

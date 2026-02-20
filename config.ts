@@ -2,6 +2,7 @@ export const CONFIG = {
   ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY!,
   TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN!,
   ALLOWED_USER_ID: process.env.TELEGRAM_USER_ID!,
+  X_BEARER_TOKEN: process.env.X_BEARER_TOKEN || '',
   MODEL: 'claude-sonnet-4-5-20250929',
   OPUS_MODEL: 'claude-opus-4-6-20250918',
   MAX_TOOL_ITERATIONS: 25,
