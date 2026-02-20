@@ -17,8 +17,10 @@ Telegram Bot API (polling)
 │  └───────┬────────┘  │
 │          │           │
 │  ┌───────▼────────┐  │
-│  │ Tool Executor  │  │  ← bash, read_file, write_file, memory, web_fetch,
-│  └────────────────┘  │    claude_code, schedule_task, think_hard
+│  │ Tool Executor  │  │  ← bash, read_file, write_file, memory_read,
+│  └────────────────┘  │    memory_update, claude_code, schedule_task,
+│                      │    think_hard, twitter, web_search*, web_fetch*
+│                      │    (* = server-side, handled by Anthropic)
 │                      │
 │  ┌────────────────┐  │
 │  │ SQLite Store   │  │  ← conversations, scheduled tasks
@@ -56,13 +58,14 @@ npm start
 
 ```
 minion/
-├── minion.ts            # Everything lives here (~640 lines)
+├── minion.ts            # Everything lives here (under 1k lines)
 ├── config.ts            # Env vars + constants
 ├── package.json
 ├── tsconfig.json
-├── SYSTEM_PROMPT.md     # Editable system prompt (agent personality)
-├── MEMORY.md            # Persistent memory the agent reads/writes
 ├── .gitignore
+├── prompts/
+│   ├── SYSTEM_PROMPT.md # Editable system prompt (agent personality)
+│   └── MEMORY.md        # Persistent memory the agent reads/writes
 ├── data/
 │   └── minion.db        # SQLite database (auto-created)
 ├── workspace/           # Working directory for agent file operations
@@ -71,7 +74,7 @@ minion/
 
 ## Tools
 
-The agent has 10 tools available:
+The agent has 10 tools available (8 client-side + 2 server-side):
 
 | Tool | Description |
 |------|-------------|
@@ -80,11 +83,12 @@ The agent has 10 tools available:
 | `write_file` | Write/create files with auto-created directories |
 | `memory_read` | Read the persistent MEMORY.md |
 | `memory_update` | Append to or rewrite MEMORY.md |
-| `web_fetch` | Fetch a URL (15s timeout, 20K char limit) |
 | `claude_code` | Delegate to Claude Code CLI for complex multi-step tasks (5 min timeout) |
 | `schedule_task` | Create, list, or remove cron-scheduled tasks |
 | `think_hard` | Send a question to Opus with extended thinking for hard reasoning |
 | `twitter` | Read tweets, view user timelines, or search recent X/Twitter posts |
+| `web_search` | Search the web (server-side, handled by Anthropic) |
+| `web_fetch` | Fetch and read a URL (server-side, handled by Anthropic) |
 
 ### claude_code
 
@@ -109,18 +113,19 @@ Anything else you send is treated as a regular message and goes through the agen
 
 ## How the Agent Loop Works
 
-1. Load conversation history from SQLite (last 50 messages)
+1. Load conversation history from SQLite (last 50 messages within 4-hour window)
 2. Append the new user message
 3. Call the Anthropic Messages API with the system prompt, tools, and messages
 4. If the model returns `end_turn` — extract text and reply
-5. If the model returns `tool_use` — execute each tool call, append results, and loop back to step 3
-6. Safety cap at 25 iterations per message
+5. If the model returns `pause_turn` — server-side tool still running; pass response back and continue the loop
+6. If the model returns `tool_use` — execute each tool call, append results, and loop back to step 3
+7. Safety cap at 25 iterations per message
 
 API calls retry with exponential backoff (3 attempts, longer delays for rate limits).
 
 ## Conversation History
 
-All messages are persisted in SQLite. When loading history for an API call, the last 50 messages are fetched and cleaned to ensure proper user/assistant alternation (required by the Anthropic API). Use `/clear` to reset.
+All messages are persisted in SQLite. When loading history for an API call, the last 50 messages within a 4-hour window are fetched and cleaned to ensure proper user/assistant alternation (required by the Anthropic API). Use `/clear` to reset.
 
 ## Scheduler
 
@@ -158,13 +163,13 @@ Other constants in `config.ts`:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `MODEL` | `claude-sonnet-4-5-20250929` | Default model for daily use |
-| `OPUS_MODEL` | `claude-opus-4-6-20250918` | Model for think_hard |
+| `MODEL` | `claude-sonnet-4-6` | Default model for daily use |
+| `OPUS_MODEL` | `claude-opus-4-6` | Model for think_hard |
 | `MAX_TOOL_ITERATIONS` | `25` | Safety cap on agent loop iterations |
 | `WORKSPACE_DIR` | `./workspace` | Working directory for file operations |
-| `MEMORY_FILE` | `./MEMORY.md` | Path to persistent memory |
+| `MEMORY_FILE` | `./prompts/MEMORY.md` | Path to persistent memory |
 | `DB_PATH` | `./data/minion.db` | SQLite database path |
-| `SYSTEM_PROMPT_FILE` | `./SYSTEM_PROMPT.md` | System prompt file path |
+| `SYSTEM_PROMPT_FILE` | `./prompts/SYSTEM_PROMPT.md` | System prompt file path |
 
 ## Running 24/7 with launchd
 
@@ -236,12 +241,13 @@ Update the `ProgramArguments` path if `npx` is installed elsewhere — run `whic
 
 ## Dependencies
 
-Only 4 runtime dependencies:
+Only 5 runtime dependencies:
 
 - `@anthropic-ai/sdk` — Anthropic Messages API
 - `better-sqlite3` — SQLite for conversations + scheduled tasks
 - `node-telegram-bot-api` — Telegram bot polling
 - `cron-parser` — Cron expression parsing for the scheduler
+- `dotenv` — Load environment variables from `.env`
 
 No web frameworks, no ORMs, no abstractions.
 

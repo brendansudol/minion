@@ -7,9 +7,9 @@ export const CONFIG = {
   OPUS_MODEL: "claude-opus-4-6",
   MAX_TOOL_ITERATIONS: 25,
   WORKSPACE_DIR: "./workspace",
-  MEMORY_FILE: "./MEMORY.md",
+  MEMORY_FILE: "./prompts/MEMORY.md",
   DB_PATH: "./data/minion.db",
-  SYSTEM_PROMPT_FILE: "./SYSTEM_PROMPT.md",
+  SYSTEM_PROMPT_FILE: "./prompts/SYSTEM_PROMPT.md",
   HISTORY_TTL_MINUTES: 60 * 4,
   MAX_HISTORY_MESSAGES: 50,
 } as const;
