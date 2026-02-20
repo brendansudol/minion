@@ -722,7 +722,7 @@ bot.on('message', async (msg) => {
       currentModel = CONFIG.OPUS_MODEL;
       await bot.sendMessage(msg.chat.id, `Switched to Opus (${CONFIG.OPUS_MODEL})`);
     } else if (model === 'sonnet') {
-      currentModel = 'claude-sonnet-4-5-20250929';
+      currentModel = 'claude-sonnet-4-6';
       await bot.sendMessage(msg.chat.id, `Switched to Sonnet`);
     } else {
       await bot.sendMessage(msg.chat.id, 'Usage: /model opus | /model sonnet');
