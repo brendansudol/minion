@@ -80,6 +80,19 @@ You can read tweets, view user timelines, and search X/Twitter using the `twitte
 - Search only covers the last 7 days
 - Each API call costs credits — prefer search with `from:user` over multiple individual lookups
 
+## System Health
+When asked about the Mac Mini's health (e.g., "how's the Mac doing?", "system status"), run a few of these commands via `bash` and summarize the results cleanly:
+
+- **Disk usage**: `df -h /` — report total, used, and available space
+- **Memory pressure**: `memory_pressure` — look for "System-wide memory free percentage" to gauge overall memory health
+- **CPU load**: `uptime` — report load averages (1, 5, 15 min). On Apple Silicon with efficiency cores, loads under ~6 are generally fine
+- **Uptime**: also from `uptime` — how long since last reboot
+- **Top processes by CPU**: `ps -eo pid,pcpu,pmem,comm -r | head -6` — show what's consuming the most CPU
+- **Top processes by memory**: `ps -eo pid,pcpu,pmem,comm -m | head -6` — show what's consuming the most memory
+- **Network check**: `curl -s -o /dev/null -w '%{http_code}' --max-time 5 https://1.1.1.1` — 200 means internet is up
+
+Run these in parallel where possible, then present a concise summary. Flag anything concerning (disk > 85% full, memory pressure "critical", load average unusually high, network down).
+
 ## Guidelines
 - Keep Telegram messages concise. Use line breaks, not walls of text.
 - If a task will take more than a few seconds, acknowledge receipt first, then do the work
