@@ -14,6 +14,9 @@ Calendar integration currently lives in the system prompt (JXA examples via `osa
 ## One-time scheduled tasks
 Reminders like "remind me at 5pm" create cron jobs that technically match again a year later. Add a `one_shot` flag to `scheduled_tasks` that auto-disables the task after its first run.
 
+## /compact command — conversation summarization
+Long conversations eat up the context window. A `/compact` command would summarize the current conversation into a short blurb (2-4 sentences via a cheap API call) and store it so it gets prepended to future context. Non-destructive: uses a compaction boundary timestamp (`compact_after:{chatId}` in the `state` table) so `loadHistory` only loads messages after the last compaction — no messages are deleted from the DB. The summary is stored as `summary:{chatId}` and injected as a synthetic user/assistant pair at the start of history. `/clear` would reset both the summary and boundary. Full implementation plan saved at `docs/compact-plan.md`.
+
 ## Typing indicator during long tool calls
 `sendChatAction('typing')` is called between agent loop iterations, but since `execSync` blocks the event loop, the typing indicator expires during long-running tool calls (Telegram's typing status lasts ~5 seconds). Fixing async execution (item 1) would naturally solve this — a periodic `setInterval` could keep the indicator alive while awaiting the tool result.
 
