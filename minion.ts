@@ -160,7 +160,7 @@ function loadHistory(chatId: string): Anthropic.MessageParam[] {
 
 // ── Tool Definitions ──────────────────────────────────────────────────
 
-const TOOLS: Anthropic.Tool[] = [
+const TOOLS: Anthropic.Messages.ToolUnion[] = [
   {
     name: 'bash',
     description: 'Execute a shell command on macOS. Returns stdout, stderr, and exit code. Use for quick system commands, brew, open, osascript, etc.',
@@ -217,17 +217,6 @@ const TOOLS: Anthropic.Tool[] = [
     },
   },
   {
-    name: 'web_fetch',
-    description: 'Fetch a URL and return its text content. Useful for checking websites, APIs, documentation.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        url: { type: 'string', description: 'URL to fetch' },
-      },
-      required: ['url'],
-    },
-  },
-  {
     name: 'claude_code',
     description: 'Delegate complex multi-step coding, debugging, or research tasks to Claude Code CLI. This gives access to full file editing, bash, web search, and MCP tools. Use for tasks that need multiple steps or deep context.',
     input_schema: {
@@ -280,6 +269,9 @@ const TOOLS: Anthropic.Tool[] = [
       required: ['action'],
     },
   },
+  // Server-side tools (executed by Anthropic, not client-side)
+  { type: 'web_search_20250305', name: 'web_search', max_uses: 5 },
+  { type: 'web_fetch_20250910', name: 'web_fetch', max_uses: 5 },
 ];
 
 // ── Tool Execution ────────────────────────────────────────────────────
@@ -348,22 +340,6 @@ async function executeTool(name: string, input: Record<string, unknown>, chatId:
           fs.writeFileSync(memPath, content, 'utf-8');
         }
         return { success: true };
-      }
-
-      case 'web_fetch': {
-        const { url } = input as { url: string };
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 15000);
-        try {
-          const resp = await fetch(url, {
-            signal: controller.signal,
-            headers: { 'User-Agent': 'Minion/1.0' },
-          });
-          const text = await resp.text();
-          return { content: text.slice(0, 20000), status: resp.status };
-        } finally {
-          clearTimeout(timeout);
-        }
       }
 
       case 'claude_code': {
@@ -571,12 +547,26 @@ async function runAgentLoop(chatId: string, userMessage: string | Anthropic.Cont
 
     saveMessage(chatId, 'assistant', response.content);
 
+    // Log server tool activity
+    for (const block of response.content) {
+      if (block.type === 'server_tool_use') {
+        console.log(`[server_tool] ${(block as any).name}(${JSON.stringify((block as any).input).slice(0, 200)})`);
+      }
+    }
+
     if (response.stop_reason === 'end_turn' || response.stop_reason === 'max_tokens') {
       const text = response.content
         .filter((b): b is Anthropic.TextBlock => b.type === 'text')
         .map((b) => b.text)
         .join('\n');
       return text || '(no response)';
+    }
+
+    if (response.stop_reason === 'pause_turn') {
+      // API paused a long-running server tool turn; pass response back to continue
+      messages.push({ role: 'assistant', content: response.content as any });
+      bot.sendChatAction(Number(chatId), 'typing').catch(() => {});
+      continue;
     }
 
     if (response.stop_reason === 'tool_use') {
@@ -594,10 +584,12 @@ async function runAgentLoop(chatId: string, userMessage: string | Anthropic.Cont
         }
       }
 
-      messages.push({ role: 'assistant', content: response.content });
-      messages.push({ role: 'user', content: toolResults });
+      messages.push({ role: 'assistant', content: response.content as any });
 
-      saveMessage(chatId, 'tool_results', toolResults);
+      if (toolResults.length > 0) {
+        messages.push({ role: 'user', content: toolResults });
+        saveMessage(chatId, 'tool_results', toolResults);
+      }
 
       // Keep sending typing indicator during tool loops
       bot.sendChatAction(Number(chatId), 'typing').catch(() => {});

@@ -68,8 +68,8 @@ You can read and send email via Apple Mail using `osascript -l JavaScript`. Mail
 
 Note: Mail.app search is basic string matching — not as powerful as Gmail's query syntax. For complex filtering, combine multiple `.whose()` clauses or post-filter in JS.
 
-## URL Summarizer
-When the user sends a message that is just a URL (or a URL with minimal context like "summarize this"), use the `web_fetch` tool to fetch the page, then provide a concise summary covering the key points. Keep it scannable — use bullet points for the main takeaways.
+## Web Search & Browsing
+You have built-in web search and web fetch capabilities. Use web_search when you need current information, to look up facts, or research topics. Use web_fetch when the user sends a URL or asks you to summarize/analyze a page. These tools are handled server-side — just decide to use them and it happens automatically.
 
 ## Twitter / X
 You can read tweets, view user timelines, and search X/Twitter using the `twitter` tool.
