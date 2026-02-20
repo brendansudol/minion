@@ -10,3 +10,19 @@ Keep it simple: no queues or locks. Just unblock the event loop. Conversation hi
 
 ## Dedicated calendar tool
 Calendar integration currently lives in the system prompt (JXA examples via `osascript`). If this proves unreliable — e.g., the model struggles with date formatting, produces broken JXA, or the commands are too verbose for the context window — consider promoting to a dedicated tool using the same JXA patterns under the hood. A tool could handle argument validation, date parsing, and error handling more robustly.
+
+## One-time scheduled tasks
+Reminders like "remind me at 5pm" create cron jobs that technically match again a year later. Add a `one_shot` flag to `scheduled_tasks` that auto-disables the task after its first run.
+
+## Typing indicator during long tool calls
+`sendChatAction('typing')` is called between agent loop iterations, but since `execSync` blocks the event loop, the typing indicator expires during long-running tool calls (Telegram's typing status lasts ~5 seconds). Fixing async execution (item 1) would naturally solve this — a periodic `setInterval` could keep the indicator alive while awaiting the tool result.
+
+---
+
+# Done
+
+## Clean model switching
+Introduced a mutable `currentModel` session variable instead of mutating the `as const` CONFIG object via `as any`.
+
+## Graceful shutdown
+Added `SIGTERM`/`SIGINT` handlers that clear the scheduler interval, stop Telegram polling, and close the SQLite database.

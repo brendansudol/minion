@@ -473,7 +473,7 @@ async function runAgentLoop(chatId: string, userMessage: string | Anthropic.Cont
     try {
       response = await callWithRetry(() =>
         anthropic.messages.create({
-          model: CONFIG.MODEL,
+          model: currentModel,
           max_tokens: 4096,
           system: loadSystemPrompt(),
           tools: TOOLS,
@@ -542,6 +542,7 @@ async function callWithRetry<T>(fn: () => Promise<T>, retries = 3): Promise<T> {
 // ── Session State ─────────────────────────────────────────────────────
 
 const startTime = Date.now();
+let currentModel: string = CONFIG.MODEL;
 
 // ── Telegram Commands & Messages ──────────────────────────────────────
 
@@ -625,7 +626,7 @@ bot.on('message', async (msg) => {
     const msgCount = (stmtMessageCount.get() as any).count;
     const taskCount = (db.prepare('SELECT COUNT(*) as count FROM scheduled_tasks WHERE enabled = 1').get() as any).count;
     await bot.sendMessage(msg.chat.id,
-      `Uptime: ${uptimeH}h\nMessages: ${msgCount}\nActive tasks: ${taskCount}\nModel: ${CONFIG.MODEL}`
+      `Uptime: ${uptimeH}h\nMessages: ${msgCount}\nActive tasks: ${taskCount}\nModel: ${currentModel}`
     );
     return;
   }
@@ -633,10 +634,10 @@ bot.on('message', async (msg) => {
   if (text.startsWith('/model ')) {
     const model = text.slice(7).trim().toLowerCase();
     if (model === 'opus') {
-      (CONFIG as any).MODEL = CONFIG.OPUS_MODEL;
+      currentModel = CONFIG.OPUS_MODEL;
       await bot.sendMessage(msg.chat.id, `Switched to Opus (${CONFIG.OPUS_MODEL})`);
     } else if (model === 'sonnet') {
-      (CONFIG as any).MODEL = 'claude-sonnet-4-5-20250929';
+      currentModel = 'claude-sonnet-4-5-20250929';
       await bot.sendMessage(msg.chat.id, `Switched to Sonnet`);
     } else {
       await bot.sendMessage(msg.chat.id, 'Usage: /model opus | /model sonnet');
@@ -664,7 +665,7 @@ bot.on('message', async (msg) => {
 
 // ── Scheduler ─────────────────────────────────────────────────────────
 
-setInterval(async () => {
+const schedulerInterval = setInterval(async () => {
   const now = new Date();
   const dueTasks = db.prepare(
     'SELECT * FROM scheduled_tasks WHERE enabled = 1 AND next_run <= ?'
@@ -691,6 +692,20 @@ setInterval(async () => {
       .run(now.toISOString(), nextRun.toISOString(), task.id);
   }
 }, 60_000);
+
+// ── Graceful Shutdown ─────────────────────────────────────────────────
+
+function shutdown(signal: string): void {
+  console.log(`\n[shutdown] Received ${signal}, shutting down...`);
+  clearInterval(schedulerInterval);
+  bot.stopPolling();
+  db.close();
+  console.log('[shutdown] Done.');
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 // ── Startup ───────────────────────────────────────────────────────────
 
