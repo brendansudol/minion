@@ -98,7 +98,9 @@ const stmtInsertMsg = db.prepare(
   'INSERT INTO messages (chat_id, role, content) VALUES (?, ?, ?)'
 );
 const stmtLoadHistory = db.prepare(
-  'SELECT role, content FROM messages WHERE chat_id = ? ORDER BY timestamp DESC LIMIT ?'
+  `SELECT role, content FROM messages
+   WHERE chat_id = ? AND timestamp > datetime('now', '-' || ? || ' minutes')
+   ORDER BY timestamp DESC LIMIT ?`
 );
 const stmtClearHistory = db.prepare('DELETE FROM messages WHERE chat_id = ?');
 const stmtMessageCount = db.prepare('SELECT COUNT(*) as count FROM messages');
@@ -107,8 +109,8 @@ function saveMessage(chatId: string, role: string, content: unknown): void {
   stmtInsertMsg.run(chatId, role, JSON.stringify(content));
 }
 
-function loadHistory(chatId: string, maxMessages = 50): Anthropic.MessageParam[] {
-  const rows = stmtLoadHistory.all(chatId, maxMessages) as { role: string; content: string }[];
+function loadHistory(chatId: string): Anthropic.MessageParam[] {
+  const rows = stmtLoadHistory.all(chatId, CONFIG.HISTORY_TTL_MINUTES, CONFIG.MAX_HISTORY_MESSAGES) as { role: string; content: string }[];
   rows.reverse();
 
   const messages: Anthropic.MessageParam[] = [];

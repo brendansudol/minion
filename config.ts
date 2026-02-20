@@ -9,4 +9,6 @@ export const CONFIG = {
   MEMORY_FILE: './MEMORY.md',
   DB_PATH: './data/minion.db',
   SYSTEM_PROMPT_FILE: './SYSTEM_PROMPT.md',
+  HISTORY_TTL_MINUTES: 60 * 4,
+  MAX_HISTORY_MESSAGES: 50,
 } as const;
