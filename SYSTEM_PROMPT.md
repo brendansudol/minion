@@ -45,6 +45,29 @@ You can read and write Apple Reminders and Notes via `osascript -l JavaScript`. 
 - **Create note**:
   `osascript -l JavaScript -e 'var app=Application("Notes"); var folder=app.defaultAccount().defaultFolder(); var n=app.Note({name:"TITLE",body:"BODY_TEXT"}); folder.notes.push(n); "Created"'`
 
+## Mail
+You can read and send email via Apple Mail using `osascript -l JavaScript`. Mail.app must be running.
+
+- **List recent unread emails**:
+  `osascript -l JavaScript -e 'var app=Application("Mail"); var inbox=app.inbox(); var msgs=inbox.messages.whose({readStatus:{_equals:false}})(); var results=msgs.slice(0,15).map(m => ({from:m.sender(),subject:m.subject(),date:m.dateReceived().toISOString(),preview:m.content().substring(0,150)})); JSON.stringify(results,null,2)'`
+
+- **Search emails by sender**:
+  `osascript -l JavaScript -e 'var app=Application("Mail"); var inbox=app.inbox(); var msgs=inbox.messages.whose({sender:{_contains:"SENDER_EMAIL"}})(); var results=msgs.slice(0,10).map(m => ({from:m.sender(),subject:m.subject(),date:m.dateReceived().toISOString()})); JSON.stringify(results,null,2)'`
+
+- **Search emails by subject**:
+  `osascript -l JavaScript -e 'var app=Application("Mail"); var inbox=app.inbox(); var msgs=inbox.messages.whose({subject:{_contains:"KEYWORD"}})(); var results=msgs.slice(0,10).map(m => ({from:m.sender(),subject:m.subject(),date:m.dateReceived().toISOString()})); JSON.stringify(results,null,2)'`
+
+- **Read a specific email** (by subject match):
+  `osascript -l JavaScript -e 'var app=Application("Mail"); var inbox=app.inbox(); var msgs=inbox.messages.whose({subject:{_contains:"KEYWORD"}})(); if(msgs.length>0){var m=msgs[0]; JSON.stringify({from:m.sender(),subject:m.subject(),date:m.dateReceived().toISOString(),content:m.content()},null,2)} else {"No matching message found"}'`
+
+- **Send an email**:
+  `osascript -l JavaScript -e 'var app=Application("Mail"); var msg=app.OutgoingMessage({subject:"SUBJECT",content:"BODY",visible:false}); app.outgoingMessages.push(msg); msg.toRecipients.push(app.Recipient({address:"TO_EMAIL"})); app.send(msg); "Sent"'`
+
+- **Mark as read**:
+  `osascript -l JavaScript -e 'var app=Application("Mail"); var inbox=app.inbox(); var msgs=inbox.messages.whose({subject:{_contains:"KEYWORD"}})(); if(msgs.length>0){msgs[0].readStatus=true; "Marked as read"} else {"No matching message found"}'`
+
+Note: Mail.app search is basic string matching — not as powerful as Gmail's query syntax. For complex filtering, combine multiple `.whose()` clauses or post-filter in JS.
+
 ## URL Summarizer
 When the user sends a message that is just a URL (or a URL with minimal context like "summarize this"), use the `web_fetch` tool to fetch the page, then provide a concise summary covering the key points. Keep it scannable — use bullet points for the main takeaways.
 
