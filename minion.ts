@@ -42,6 +42,33 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_tasks_next ON scheduled_tasks(next_run) WHERE enabled = 1;
 `);
 
+// Database row types
+interface CountRow { count: number }
+interface HistoryRow { role: string; content: string }
+interface TaskListRow {
+  id: number;
+  name: string;
+  cron_expression: string;
+  enabled: number;
+  next_run: string | null;
+}
+interface ScheduledTaskRow extends TaskListRow {
+  prompt: string;
+  chat_id: string;
+  last_run: string | null;
+}
+
+// Error helpers
+interface ExecError extends Error {
+  stdout?: string;
+  stderr?: string;
+  status?: number | null;
+}
+
+function errMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 // ── Clients ───────────────────────────────────────────────────────────
 
 const anthropic = new Anthropic({ apiKey: CONFIG.ANTHROPIC_API_KEY });
@@ -65,12 +92,12 @@ function resolvePath(p: string): string {
   return path.resolve(workspaceDir, p);
 }
 
-async function downloadTelegramPhoto(fileId: string): Promise<{ base64: string; mime: string; ext: string }> {
+async function downloadTelegramPhoto(fileId: string): Promise<{ base64: string; mime: Anthropic.Base64ImageSource['media_type']; ext: string }> {
   const fileLink = await bot.getFileLink(fileId);
   const resp = await fetch(fileLink);
   const buffer = Buffer.from(await resp.arrayBuffer());
   const ext = path.extname(new URL(fileLink).pathname).slice(1) || 'jpg';
-  const mimeMap: Record<string, string> = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp' };
+  const mimeMap: Record<string, Anthropic.Base64ImageSource['media_type']> = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp' };
   const mime = mimeMap[ext] || 'image/jpeg';
   return { base64: buffer.toString('base64'), mime, ext };
 }
@@ -97,20 +124,20 @@ function splitMessage(text: string, limit = 4000): string[] {
 const stmtInsertMsg = db.prepare(
   'INSERT INTO messages (chat_id, role, content) VALUES (?, ?, ?)'
 );
-const stmtLoadHistory = db.prepare(
+const stmtLoadHistory = db.prepare<[string, number, number], HistoryRow>(
   `SELECT role, content FROM messages
    WHERE chat_id = ? AND timestamp > datetime('now', '-' || ? || ' minutes')
    ORDER BY timestamp DESC LIMIT ?`
 );
 const stmtClearHistory = db.prepare('DELETE FROM messages WHERE chat_id = ?');
-const stmtMessageCount = db.prepare('SELECT COUNT(*) as count FROM messages');
+const stmtMessageCount = db.prepare<[], CountRow>('SELECT COUNT(*) as count FROM messages');
 
 function saveMessage(chatId: string, role: string, content: unknown): void {
   stmtInsertMsg.run(chatId, role, JSON.stringify(content));
 }
 
 function loadHistory(chatId: string): Anthropic.MessageParam[] {
-  const rows = stmtLoadHistory.all(chatId, CONFIG.HISTORY_TTL_MINUTES, CONFIG.MAX_HISTORY_MESSAGES) as { role: string; content: string }[];
+  const rows = stmtLoadHistory.all(chatId, CONFIG.HISTORY_TTL_MINUTES, CONFIG.MAX_HISTORY_MESSAGES);
   rows.reverse();
 
   const messages: Anthropic.MessageParam[] = [];
@@ -128,7 +155,6 @@ function loadHistory(chatId: string): Anthropic.MessageParam[] {
   for (const msg of messages) {
     const last = cleaned[cleaned.length - 1];
     if (last && last.role === msg.role) {
-      // Merge consecutive same-role messages
       if (typeof last.content === 'string' && typeof msg.content === 'string') {
         last.content = last.content + '\n' + msg.content;
       } else {
@@ -148,7 +174,7 @@ function loadHistory(chatId: string): Anthropic.MessageParam[] {
       cleaned.shift();
       continue;
     }
-    if (Array.isArray(first.content) && first.content.some((b: any) => b.type === 'tool_result')) {
+    if (Array.isArray(first.content) && first.content.some((b) => b.type === 'tool_result')) {
       cleaned.shift();
       continue;
     }
@@ -277,7 +303,6 @@ const TOOLS: Anthropic.Messages.ToolUnion[] = [
 // ── Tool Execution ────────────────────────────────────────────────────
 
 const BLOCKED_PATTERNS = [/rm\s+-rf\s+\/(?!\w)/, /sudo\s+/];
-const SAFE_COMMANDS = ['date', 'whoami', 'brew', 'system_profiler', 'sw_vers', 'uptime', 'df', 'which', 'echo', 'cat', 'ls', 'pwd', 'hostname', 'ifconfig', 'networksetup', 'pmset', 'sysctl', 'uname', 'open', 'osascript', 'pbcopy', 'pbpaste', 'defaults', 'top', 'ps'];
 
 async function executeTool(name: string, input: Record<string, unknown>, chatId: string): Promise<unknown> {
   try {
@@ -298,11 +323,12 @@ async function executeTool(name: string, input: Record<string, unknown>, chatId:
             env: { ...process.env, PATH: `${process.env.HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:${process.env.PATH}` },
           });
           return { stdout: stdout.slice(0, 50000), stderr: '', exit_code: 0 };
-        } catch (err: any) {
+        } catch (err) {
+          const e = err as ExecError;
           return {
-            stdout: (err.stdout || '').slice(0, 50000),
-            stderr: (err.stderr || err.message || '').slice(0, 10000),
-            exit_code: err.status ?? 1,
+            stdout: (e.stdout || '').slice(0, 50000),
+            stderr: (e.stderr || e.message || '').slice(0, 10000),
+            exit_code: e.status ?? 1,
           };
         }
       }
@@ -363,20 +389,18 @@ async function executeTool(name: string, input: Record<string, unknown>, chatId:
               if (obj.type === 'result' && obj.result) {
                 resultText = obj.result;
               } else if (obj.type === 'assistant' && obj.message?.content) {
-                // Accumulate assistant text blocks
                 for (const block of obj.message.content) {
                   if (block.type === 'text') {
                     resultText = block.text;
                   }
                 }
               }
-            } catch {
-              // Skip unparseable lines
-            }
+            } catch {}
           }
           return { result: resultText || output.slice(-5000) };
-        } catch (err: any) {
-          return { result: `Claude Code error: ${(err.stderr || err.message || '').slice(0, 5000)}` };
+        } catch (err) {
+          const e = err as ExecError;
+          return { result: `Claude Code error: ${(e.stderr || e.message || '').slice(0, 5000)}` };
         }
       }
 
@@ -502,8 +526,8 @@ async function executeTool(name: string, input: Record<string, unknown>, chatId:
       default:
         return { error: `Unknown tool: ${name}` };
     }
-  } catch (err: any) {
-    return { error: err.message || String(err) };
+  } catch (err: unknown) {
+    return { error: errMsg(err) };
   }
 }
 
@@ -541,16 +565,15 @@ async function runAgentLoop(chatId: string, userMessage: string | Anthropic.Cont
           messages,
         })
       );
-    } catch (err: any) {
-      return `API error: ${err.message}`;
+    } catch (err: unknown) {
+      return `API error: ${errMsg(err)}`;
     }
 
     saveMessage(chatId, 'assistant', response.content);
 
-    // Log server tool activity
     for (const block of response.content) {
       if (block.type === 'server_tool_use') {
-        console.log(`[server_tool] ${(block as any).name}(${JSON.stringify((block as any).input).slice(0, 200)})`);
+        console.log(`[server_tool] ${block.name}(${JSON.stringify(block.input).slice(0, 200)})`);
       }
     }
 
@@ -564,7 +587,7 @@ async function runAgentLoop(chatId: string, userMessage: string | Anthropic.Cont
 
     if (response.stop_reason === 'pause_turn') {
       // API paused a long-running server tool turn; pass response back to continue
-      messages.push({ role: 'assistant', content: response.content as any });
+      messages.push({ role: 'assistant', content: response.content as Anthropic.ContentBlockParam[] });
       bot.sendChatAction(Number(chatId), 'typing').catch(() => {});
       continue;
     }
@@ -584,14 +607,13 @@ async function runAgentLoop(chatId: string, userMessage: string | Anthropic.Cont
         }
       }
 
-      messages.push({ role: 'assistant', content: response.content as any });
+      messages.push({ role: 'assistant', content: response.content as Anthropic.ContentBlockParam[] });
 
       if (toolResults.length > 0) {
         messages.push({ role: 'user', content: toolResults });
         saveMessage(chatId, 'tool_results', toolResults);
       }
 
-      // Keep sending typing indicator during tool loops
       bot.sendChatAction(Number(chatId), 'typing').catch(() => {});
     }
   }
@@ -605,11 +627,11 @@ async function callWithRetry<T>(fn: () => Promise<T>, retries = 3): Promise<T> {
   for (let i = 0; i < retries; i++) {
     try {
       return await fn();
-    } catch (err: any) {
+    } catch (err: unknown) {
       if (i === retries - 1) throw err;
-      const isRateLimit = err.status === 429;
+      const isRateLimit = err instanceof Anthropic.RateLimitError;
       const delay = isRateLimit ? 5000 * (i + 1) : 1000 * (i + 1);
-      console.log(`[retry] Attempt ${i + 1} failed: ${err.message}. Retrying in ${delay}ms...`);
+      console.log(`[retry] Attempt ${i + 1} failed: ${errMsg(err)}. Retrying in ${delay}ms...`);
       await new Promise((r) => setTimeout(r, delay));
     }
   }
@@ -644,7 +666,7 @@ bot.on('message', async (msg) => {
       fs.writeFileSync(path.join(imagesDir, filename), Buffer.from(base64, 'base64'));
 
       const contentBlocks: Anthropic.ContentBlockParam[] = [
-        { type: 'image', source: { type: 'base64', media_type: mime as 'image/jpeg', data: base64 } },
+        { type: 'image', source: { type: 'base64', media_type: mime, data: base64 } },
         { type: 'text', text: caption },
       ];
       const saveAs = `[Image: workspace/images/${filename}] ${caption}`;
@@ -656,9 +678,9 @@ bot.on('message', async (msg) => {
           bot.sendMessage(msg.chat.id, chunk)
         );
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('[error] photo handling:', err);
-      await bot.sendMessage(msg.chat.id, `❌ Error processing image: ${err.message}`);
+      await bot.sendMessage(msg.chat.id, `❌ Error processing image: ${errMsg(err)}`);
     }
     return;
   }
@@ -674,12 +696,12 @@ bot.on('message', async (msg) => {
   }
 
   if (text === '/tasks') {
-    const tasks = db.prepare('SELECT id, name, cron_expression, enabled, next_run FROM scheduled_tasks').all() as any[];
+    const tasks = db.prepare<[], TaskListRow>('SELECT id, name, cron_expression, enabled, next_run FROM scheduled_tasks').all();
     if (tasks.length === 0) {
       await bot.sendMessage(msg.chat.id, 'No scheduled tasks.');
       return;
     }
-    const lines = tasks.map((t: any) => `${t.enabled ? '✅' : '❌'} #${t.id} ${t.name} — \`${t.cron_expression}\`\nNext: ${t.next_run || 'N/A'}`);
+    const lines = tasks.map((t) => `${t.enabled ? '✅' : '❌'} #${t.id} ${t.name} — \`${t.cron_expression}\`\nNext: ${t.next_run || 'N/A'}`);
     await bot.sendMessage(msg.chat.id, lines.join('\n\n'), { parse_mode: 'Markdown' });
     return;
   }
@@ -700,8 +722,8 @@ bot.on('message', async (msg) => {
   if (text === '/status') {
     const uptimeMs = Date.now() - startTime;
     const uptimeH = (uptimeMs / 3600000).toFixed(1);
-    const msgCount = (stmtMessageCount.get() as any).count;
-    const taskCount = (db.prepare('SELECT COUNT(*) as count FROM scheduled_tasks WHERE enabled = 1').get() as any).count;
+    const msgCount = stmtMessageCount.get()?.count ?? 0;
+    const taskCount = db.prepare<[], CountRow>('SELECT COUNT(*) as count FROM scheduled_tasks WHERE enabled = 1').get()?.count ?? 0;
     await bot.sendMessage(msg.chat.id,
       `Uptime: ${uptimeH}h\nMessages: ${msgCount}\nActive tasks: ${taskCount}\nModel: ${currentModel}`
     );
@@ -714,8 +736,8 @@ bot.on('message', async (msg) => {
       currentModel = CONFIG.OPUS_MODEL;
       await bot.sendMessage(msg.chat.id, `Switched to Opus (${CONFIG.OPUS_MODEL})`);
     } else if (model === 'sonnet') {
-      currentModel = 'claude-sonnet-4-6';
-      await bot.sendMessage(msg.chat.id, `Switched to Sonnet`);
+      currentModel = CONFIG.MODEL;
+      await bot.sendMessage(msg.chat.id, `Switched to Sonnet (${CONFIG.MODEL})`);
     } else {
       await bot.sendMessage(msg.chat.id, 'Usage: /model opus | /model sonnet');
     }
@@ -734,9 +756,9 @@ bot.on('message', async (msg) => {
         bot.sendMessage(msg.chat.id, chunk)
       );
     }
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error('[error]', err);
-    await bot.sendMessage(msg.chat.id, `❌ Error: ${err.message}`);
+    await bot.sendMessage(msg.chat.id, `❌ Error: ${errMsg(err)}`);
   }
 });
 
@@ -744,9 +766,9 @@ bot.on('message', async (msg) => {
 
 const schedulerInterval = setInterval(async () => {
   const now = new Date();
-  const dueTasks = db.prepare(
+  const dueTasks = db.prepare<[string], ScheduledTaskRow>(
     'SELECT * FROM scheduled_tasks WHERE enabled = 1 AND next_run <= ?'
-  ).all(now.toISOString()) as any[];
+  ).all(now.toISOString());
 
   for (const task of dueTasks) {
     try {
@@ -758,12 +780,11 @@ const schedulerInterval = setInterval(async () => {
           bot.sendMessage(Number(task.chat_id), chunk)
         );
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error(`[scheduler] Task "${task.name}" failed:`, err);
-      await bot.sendMessage(Number(task.chat_id), `❌ Scheduled task "${task.name}" failed: ${err.message}`).catch(() => {});
+      await bot.sendMessage(Number(task.chat_id), `❌ Scheduled task "${task.name}" failed: ${errMsg(err)}`).catch(() => {});
     }
 
-    // Update next_run
     const nextRun = getNextCronRun(task.cron_expression);
     db.prepare('UPDATE scheduled_tasks SET last_run = ?, next_run = ? WHERE id = ?')
       .run(now.toISOString(), nextRun.toISOString(), task.id);
