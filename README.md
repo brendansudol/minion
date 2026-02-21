@@ -8,7 +8,7 @@ A personal AI assistant that lives in a Telegram chat, running 24/7 on a Mac Min
 Telegram Bot API (polling)
         │
         ▼
-┌─────────────────────┐
+┌──────────────────────┐
 │   minion.ts          │
 │                      │
 │  ┌────────────────┐  │
@@ -76,19 +76,19 @@ minion/
 
 The agent has 10 tools available (8 client-side + 2 server-side):
 
-| Tool | Description |
-|------|-------------|
-| `bash` | Execute shell commands on macOS (30s default timeout) |
-| `read_file` | Read file contents (relative to workspace or absolute) |
-| `write_file` | Write/create files with auto-created directories |
-| `memory_read` | Read the persistent MEMORY.md |
-| `memory_update` | Append to or rewrite MEMORY.md |
-| `claude_code` | Delegate to Claude Code CLI for complex multi-step tasks (5 min timeout) |
-| `schedule_task` | Create, list, or remove cron-scheduled tasks |
-| `think_hard` | Send a question to Opus with extended thinking for hard reasoning |
-| `twitter` | Read tweets, view user timelines, or search recent X/Twitter posts |
-| `web_search` | Search the web (server-side, handled by Anthropic) |
-| `web_fetch` | Fetch and read a URL (server-side, handled by Anthropic) |
+| Tool            | Description                                                              |
+| --------------- | ------------------------------------------------------------------------ |
+| `bash`          | Execute shell commands on macOS (30s default timeout)                    |
+| `read_file`     | Read file contents (relative to workspace or absolute)                   |
+| `write_file`    | Write/create files with auto-created directories                         |
+| `memory_read`   | Read the persistent MEMORY.md                                            |
+| `memory_update` | Append to or rewrite MEMORY.md                                           |
+| `claude_code`   | Delegate to Claude Code CLI for complex multi-step tasks (5 min timeout) |
+| `schedule_task` | Create, list, or remove cron-scheduled tasks                             |
+| `think_hard`    | Send a question to Opus with extended thinking for hard reasoning        |
+| `twitter`       | Read tweets, view user timelines, or search recent X/Twitter posts       |
+| `web_search`    | Search the web (server-side, handled by Anthropic)                       |
+| `web_fetch`     | Fetch and read a URL (server-side, handled by Anthropic)                 |
 
 ### claude_code
 
@@ -100,14 +100,14 @@ Calls Opus with extended thinking (10K budget tokens) for genuinely difficult re
 
 ## Telegram Commands
 
-| Command | Description |
-|---------|-------------|
-| `/clear` | Reset conversation history |
-| `/tasks` | List all scheduled tasks |
-| `/memory` | Show current MEMORY.md contents |
-| `/status` | Show uptime, message count, pending tasks, current model |
-| `/model opus` | Switch to Opus for this session |
-| `/model sonnet` | Switch back to Sonnet |
+| Command         | Description                                              |
+| --------------- | -------------------------------------------------------- |
+| `/clear`        | Reset conversation history                               |
+| `/tasks`        | List all scheduled tasks                                 |
+| `/memory`       | Show current MEMORY.md contents                          |
+| `/status`       | Show uptime, message count, pending tasks, current model |
+| `/model opus`   | Switch to Opus for this session                          |
+| `/model sonnet` | Switch back to Sonnet                                    |
 
 Anything else you send is treated as a regular message and goes through the agent loop.
 
@@ -136,6 +136,7 @@ A `setInterval` checks the `scheduled_tasks` table every 60 seconds. When a task
 3. Computes the next run time from the cron expression and updates the row
 
 You can create scheduled tasks by asking the agent directly, e.g.:
+
 > "Set up a daily briefing at 9am that checks my calendar and summarizes the weather"
 
 Or the agent uses the `schedule_task` tool programmatically with standard 5-field cron expressions (`min hour dom mon dow`).
@@ -152,24 +153,24 @@ The agent's personality and instructions are loaded from `SYSTEM_PROMPT.md`. Edi
 
 All configuration is in `config.ts` via environment variables:
 
-| Variable | Description |
-|----------|-------------|
-| `ANTHROPIC_API_KEY` | Anthropic API key |
-| `TELEGRAM_BOT_TOKEN` | Telegram bot token from BotFather |
-| `TELEGRAM_USER_ID` | Your Telegram user ID (only this user gets responses) |
-| `X_BEARER_TOKEN` | X/Twitter API bearer token (optional, for twitter tool) |
+| Variable             | Description                                             |
+| -------------------- | ------------------------------------------------------- |
+| `ANTHROPIC_API_KEY`  | Anthropic API key                                       |
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token from BotFather                       |
+| `TELEGRAM_USER_ID`   | Your Telegram user ID (only this user gets responses)   |
+| `X_BEARER_TOKEN`     | X/Twitter API bearer token (optional, for twitter tool) |
 
 Other constants in `config.ts`:
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `MODEL` | `claude-sonnet-4-6` | Default model for daily use |
-| `OPUS_MODEL` | `claude-opus-4-6` | Model for think_hard |
-| `MAX_TOOL_ITERATIONS` | `25` | Safety cap on agent loop iterations |
-| `WORKSPACE_DIR` | `./workspace` | Working directory for file operations |
-| `MEMORY_FILE` | `./prompts/MEMORY.md` | Path to persistent memory |
-| `DB_PATH` | `./data/minion.db` | SQLite database path |
-| `SYSTEM_PROMPT_FILE` | `./prompts/SYSTEM_PROMPT.md` | System prompt file path |
+| Key                   | Default                      | Description                           |
+| --------------------- | ---------------------------- | ------------------------------------- |
+| `MODEL`               | `claude-sonnet-4-6`          | Default model for daily use           |
+| `OPUS_MODEL`          | `claude-opus-4-6`            | Model for think_hard                  |
+| `MAX_TOOL_ITERATIONS` | `25`                         | Safety cap on agent loop iterations   |
+| `WORKSPACE_DIR`       | `./workspace`                | Working directory for file operations |
+| `MEMORY_FILE`         | `./prompts/MEMORY.md`        | Path to persistent memory             |
+| `DB_PATH`             | `./data/minion.db`           | SQLite database path                  |
+| `SYSTEM_PROMPT_FILE`  | `./prompts/SYSTEM_PROMPT.md` | System prompt file path               |
 
 ## Running 24/7 with launchd
 
