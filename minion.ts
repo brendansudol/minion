@@ -102,7 +102,7 @@ async function downloadTelegramPhoto(fileId: string): Promise<{ base64: string; 
   return { base64: buffer.toString('base64'), mime, ext };
 }
 
-function splitMessage(text: string, limit = 4000): string[] {
+function splitMessage(text: string, limit = 4_000): string[] {
   if (text.length <= limit) return [text];
   const chunks: string[] = [];
   let remaining = text;
@@ -322,12 +322,12 @@ async function executeTool(name: string, input: Record<string, unknown>, chatId:
             encoding: 'utf-8',
             env: { ...process.env, PATH: `${process.env.HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:${process.env.PATH}` },
           });
-          return { stdout: stdout.slice(0, 50000), stderr: '', exit_code: 0 };
+          return { stdout: stdout.slice(0, 50_000), stderr: '', exit_code: 0 };
         } catch (err) {
           const e = err as ExecError;
           return {
-            stdout: (e.stdout || '').slice(0, 50000),
-            stderr: (e.stderr || e.message || '').slice(0, 10000),
+            stdout: (e.stdout || '').slice(0, 50_000),
+            stderr: (e.stderr || e.message || '').slice(0, 10_000),
             exit_code: e.status ?? 1,
           };
         }
@@ -337,7 +337,7 @@ async function executeTool(name: string, input: Record<string, unknown>, chatId:
         const { path: filePath } = input as { path: string };
         const resolved = resolvePath(filePath);
         const content = fs.readFileSync(resolved, 'utf-8');
-        return { content: content.slice(0, 100000) };
+        return { content: content.slice(0, 100_000) };
       }
 
       case 'write_file': {
@@ -397,10 +397,10 @@ async function executeTool(name: string, input: Record<string, unknown>, chatId:
               }
             } catch {}
           }
-          return { result: resultText || output.slice(-5000) };
+          return { result: resultText || output.slice(-5_000) };
         } catch (err) {
           const e = err as ExecError;
-          return { result: `Claude Code error: ${(e.stderr || e.message || '').slice(0, 5000)}` };
+          return { result: `Claude Code error: ${(e.stderr || e.message || '').slice(0, 5_000)}` };
         }
       }
 
@@ -441,8 +441,8 @@ async function executeTool(name: string, input: Record<string, unknown>, chatId:
         const { question } = input as { question: string };
         const resp = await anthropic.messages.create({
           model: CONFIG.OPUS_MODEL,
-          max_tokens: 16000,
-          thinking: { type: 'enabled', budget_tokens: 10000 },
+          max_tokens: 16_000,
+          thinking: { type: 'enabled', budget_tokens: 10_000 },
           messages: [{ role: 'user', content: question }],
         });
 
@@ -452,7 +452,7 @@ async function executeTool(name: string, input: Record<string, unknown>, chatId:
           if (block.type === 'thinking') reasoning = block.thinking;
           if (block.type === 'text') answer += block.text;
         }
-        return { reasoning: reasoning.slice(0, 5000), answer };
+        return { reasoning: reasoning.slice(0, 5_000), answer };
       }
 
       case 'twitter': {
@@ -477,7 +477,7 @@ async function executeTool(name: string, input: Record<string, unknown>, chatId:
           });
           if (!resp.ok) {
             const body = await resp.text();
-            return { error: `X API ${resp.status}: ${body.slice(0, 1000)}` };
+            return { error: `X API ${resp.status}: ${body.slice(0, 1_000)}` };
           }
           return resp.json();
         };
@@ -559,7 +559,7 @@ async function runAgentLoop(chatId: string, userMessage: string | Anthropic.Cont
       response = await callWithRetry(() =>
         anthropic.messages.create({
           model: currentModel,
-          max_tokens: 4096,
+          max_tokens: 4_096,
           system: loadSystemPrompt(),
           tools: TOOLS,
           messages,
@@ -602,7 +602,7 @@ async function runAgentLoop(chatId: string, userMessage: string | Anthropic.Cont
           toolResults.push({
             type: 'tool_result',
             tool_use_id: block.id,
-            content: JSON.stringify(result).slice(0, 50000),
+            content: JSON.stringify(result).slice(0, 50_000),
           });
         }
       }
@@ -630,7 +630,7 @@ async function callWithRetry<T>(fn: () => Promise<T>, retries = 3): Promise<T> {
     } catch (err: unknown) {
       if (i === retries - 1) throw err;
       const isRateLimit = err instanceof Anthropic.RateLimitError;
-      const delay = isRateLimit ? 5000 * (i + 1) : 1000 * (i + 1);
+      const delay = isRateLimit ? 5_000 * (i + 1) : 1_000 * (i + 1);
       console.log(`[retry] Attempt ${i + 1} failed: ${errMsg(err)}. Retrying in ${delay}ms...`);
       await new Promise((r) => setTimeout(r, delay));
     }
@@ -721,7 +721,7 @@ bot.on('message', async (msg) => {
 
   if (text === '/status') {
     const uptimeMs = Date.now() - startTime;
-    const uptimeH = (uptimeMs / 3600000).toFixed(1);
+    const uptimeH = (uptimeMs / 3_600_000).toFixed(1);
     const msgCount = stmtMessageCount.get()?.count ?? 0;
     const taskCount = db.prepare<[], CountRow>('SELECT COUNT(*) as count FROM scheduled_tasks WHERE enabled = 1').get()?.count ?? 0;
     await bot.sendMessage(msg.chat.id,
