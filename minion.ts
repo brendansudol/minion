@@ -3,7 +3,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import Database from 'better-sqlite3';
 import TelegramBot from 'node-telegram-bot-api';
 import { CronExpressionParser } from 'cron-parser';
-import { execSync } from 'child_process';
+import { execSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { CONFIG } from './config.js';
@@ -38,8 +38,23 @@ db.exec(`
     value TEXT NOT NULL,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+  CREATE TABLE IF NOT EXISTS jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    status TEXT NOT NULL,
+    input_json TEXT NOT NULL,
+    request_excerpt TEXT NOT NULL,
+    result_text TEXT,
+    error_text TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    started_at DATETIME,
+    finished_at DATETIME
+  );
   CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, timestamp);
   CREATE INDEX IF NOT EXISTS idx_tasks_next ON scheduled_tasks(next_run) WHERE enabled = 1;
+  CREATE INDEX IF NOT EXISTS idx_jobs_status_created ON jobs(status, created_at);
+  CREATE INDEX IF NOT EXISTS idx_jobs_chat_created ON jobs(chat_id, created_at DESC);
 `);
 
 // Database row types
@@ -56,6 +71,37 @@ interface ScheduledTaskRow extends TaskListRow {
   prompt: string;
   chat_id: string;
   last_run: string | null;
+}
+type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed';
+interface JobRow {
+  id: number;
+  chat_id: string;
+  kind: string;
+  status: JobStatus;
+  input_json: string;
+  request_excerpt: string;
+  result_text: string | null;
+  error_text: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+interface JobListRow {
+  id: number;
+  kind: string;
+  status: JobStatus;
+  request_excerpt: string;
+  created_at: string;
+  finished_at: string | null;
+}
+interface ClaudeToolInput {
+  prompt: string;
+  working_directory?: string;
+}
+interface ClaudeStreamAccumulator {
+  resultText: string;
+  stdoutTail: string;
+  stderrTail: string;
 }
 
 // Error helpers
@@ -119,6 +165,53 @@ function splitMessage(text: string, limit = 4_000): string[] {
   return chunks;
 }
 
+const REQUEST_EXCERPT_MAX_CHARS = 200;
+const JOB_RESULT_MAX_CHARS = 50_000;
+const JOB_ERROR_MAX_CHARS = 10_000;
+const CLAUDE_STDOUT_TAIL_MAX = 200_000;
+const CLAUDE_STDERR_TAIL_MAX = 50_000;
+const CLAUDE_TIMEOUT_MS = 300_000;
+
+function truncateText(text: string, maxChars: number): string {
+  return text.length <= maxChars ? text : text.slice(0, maxChars);
+}
+
+function appendTail(existing: string, incoming: string, maxChars: number): string {
+  const combined = existing + incoming;
+  return combined.length <= maxChars ? combined : combined.slice(combined.length - maxChars);
+}
+
+function buildRequestExcerpt(prompt: string): string {
+  return truncateText(prompt.replace(/\s+/g, ' ').trim(), REQUEST_EXCERPT_MAX_CHARS);
+}
+
+function parseClaudeStreamLine(line: string, acc: ClaudeStreamAccumulator): void {
+  try {
+    const obj = JSON.parse(line) as {
+      type?: string;
+      result?: string;
+      message?: {
+        content?: Array<{ type?: string; text?: string }>;
+      };
+    };
+
+    if (obj.type === 'result' && typeof obj.result === 'string') {
+      acc.resultText = obj.result;
+      return;
+    }
+
+    if (obj.type === 'assistant' && Array.isArray(obj.message?.content)) {
+      for (const block of obj.message.content) {
+        if (block.type === 'text' && typeof block.text === 'string') {
+          acc.resultText = block.text;
+        }
+      }
+    }
+  } catch {
+    // Ignore non-JSON lines from claude stream output.
+  }
+}
+
 // ── History ───────────────────────────────────────────────────────────
 
 const stmtInsertMsg = db.prepare(
@@ -131,6 +224,33 @@ const stmtLoadHistory = db.prepare<[string, number, number], HistoryRow>(
 );
 const stmtClearHistory = db.prepare('DELETE FROM messages WHERE chat_id = ?');
 const stmtMessageCount = db.prepare<[], CountRow>('SELECT COUNT(*) as count FROM messages');
+const stmtUpdateTaskRun = db.prepare('UPDATE scheduled_tasks SET last_run = ?, next_run = ? WHERE id = ?');
+
+const stmtInsertJob = db.prepare(
+  'INSERT INTO jobs (chat_id, kind, status, input_json, request_excerpt) VALUES (?, ?, ?, ?, ?)'
+);
+const stmtSelectNextQueuedJob = db.prepare<[], JobRow>(
+  `SELECT id, chat_id, kind, status, input_json, request_excerpt, result_text, error_text, created_at, started_at, finished_at
+   FROM jobs
+   WHERE status = 'queued'
+   ORDER BY id ASC
+   LIMIT 1`
+);
+const stmtMarkJobRunning = db.prepare('UPDATE jobs SET status = ?, started_at = ?, finished_at = NULL, error_text = NULL WHERE id = ?');
+const stmtMarkJobSucceeded = db.prepare('UPDATE jobs SET status = ?, result_text = ?, error_text = NULL, finished_at = ? WHERE id = ?');
+const stmtMarkJobFailed = db.prepare('UPDATE jobs SET status = ?, error_text = ?, finished_at = ? WHERE id = ?');
+const stmtListJobsByChat = db.prepare<[string], JobListRow>(
+  `SELECT id, kind, status, request_excerpt, created_at, finished_at
+   FROM jobs
+   WHERE chat_id = ?
+   ORDER BY id DESC
+   LIMIT 10`
+);
+const stmtGetJobByIdAndChat = db.prepare<[number, string], JobRow>(
+  `SELECT id, chat_id, kind, status, input_json, request_excerpt, result_text, error_text, created_at, started_at, finished_at
+   FROM jobs
+   WHERE id = ? AND chat_id = ?`
+);
 
 function saveMessage(chatId: string, role: string, content: unknown): void {
   stmtInsertMsg.run(chatId, role, JSON.stringify(content));
@@ -182,6 +302,217 @@ function loadHistory(chatId: string): Anthropic.MessageParam[] {
   }
 
   return cleaned;
+}
+
+const chatQueues = new Map<string, Promise<void>>();
+
+function enqueueChatTask(chatId: string, task: () => Promise<void>): void {
+  const previous = chatQueues.get(chatId) ?? Promise.resolve();
+  const next = previous
+    .catch((err: unknown) => {
+      console.error(`[chat_queue] Previous task failed for ${chatId}:`, err);
+    })
+    .then(task)
+    .catch((err: unknown) => {
+      console.error(`[chat_queue] Task failed for ${chatId}:`, err);
+    });
+
+  chatQueues.set(chatId, next);
+  void next.finally(() => {
+    if (chatQueues.get(chatId) === next) {
+      chatQueues.delete(chatId);
+    }
+  });
+}
+
+function statusEmoji(status: JobStatus): string {
+  switch (status) {
+    case 'queued':
+      return '🕒';
+    case 'running':
+      return '🏃';
+    case 'succeeded':
+      return '✅';
+    case 'failed':
+      return '❌';
+    default:
+      return '•';
+  }
+}
+
+async function sendMessageChunks(chatId: string, text: string, parseMode: 'Markdown' | null = null): Promise<void> {
+  const chunks = splitMessage(text);
+  for (const chunk of chunks) {
+    if (parseMode) {
+      try {
+        await bot.sendMessage(Number(chatId), chunk, { parse_mode: parseMode });
+      } catch {
+        try {
+          await bot.sendMessage(Number(chatId), chunk);
+        } catch (err: unknown) {
+          console.error(`[telegram] Failed to send message chunk to ${chatId}: ${errMsg(err)}`);
+        }
+      }
+    } else {
+      try {
+        await bot.sendMessage(Number(chatId), chunk);
+      } catch (err: unknown) {
+        console.error(`[telegram] Failed to send message chunk to ${chatId}: ${errMsg(err)}`);
+      }
+    }
+  }
+}
+
+async function runClaudeCodeProcess(input: ClaudeToolInput): Promise<string> {
+  const cwd = input.working_directory ? path.resolve(input.working_directory) : workspaceDir;
+
+  return new Promise<string>((resolve, reject) => {
+    const acc: ClaudeStreamAccumulator = { resultText: '', stdoutTail: '', stderrTail: '' };
+    let stdoutBuffer = '';
+    let timedOut = false;
+    let settled = false;
+
+    const child = spawn('claude', ['-p', input.prompt, '--verbose', '--output-format', 'stream-json'], {
+      cwd,
+      env: {
+        ...process.env,
+        PATH: `${process.env.HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:${process.env.PATH}`,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGTERM');
+      setTimeout(() => child.kill('SIGKILL'), 5_000).unref();
+    }, CLAUDE_TIMEOUT_MS);
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      const text = chunk.toString('utf-8');
+      acc.stdoutTail = appendTail(acc.stdoutTail, text, CLAUDE_STDOUT_TAIL_MAX);
+      stdoutBuffer += text;
+
+      let newline = stdoutBuffer.indexOf('\n');
+      while (newline !== -1) {
+        const line = stdoutBuffer.slice(0, newline).trim();
+        stdoutBuffer = stdoutBuffer.slice(newline + 1);
+        if (line) parseClaudeStreamLine(line, acc);
+        newline = stdoutBuffer.indexOf('\n');
+      }
+    });
+
+    child.stderr.on('data', (chunk: Buffer) => {
+      acc.stderrTail = appendTail(acc.stderrTail, chunk.toString('utf-8'), CLAUDE_STDERR_TAIL_MAX);
+    });
+
+    child.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      reject(new Error(`Claude Code spawn error: ${err.message}`));
+    });
+
+    child.on('close', (code, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+
+      const leftover = stdoutBuffer.trim();
+      if (leftover) parseClaudeStreamLine(leftover, acc);
+
+      if (timedOut) {
+        reject(new Error('Claude Code timed out after 300 seconds.'));
+        return;
+      }
+
+      if (code === 0) {
+        const result = truncateText(acc.resultText || acc.stdoutTail.slice(-5_000) || '(no result)', JOB_RESULT_MAX_CHARS);
+        resolve(result);
+        return;
+      }
+
+      const errTail = truncateText(acc.stderrTail || acc.stdoutTail || `Process exited with code ${String(code)}`, 5_000);
+      reject(new Error(`Claude Code exited with code ${String(code)}${signal ? ` (${signal})` : ''}: ${errTail}`));
+    });
+  });
+}
+
+let jobRunnerActive = false;
+
+function enqueueClaudeCodeJob(chatId: string, input: ClaudeToolInput): { job_id: number; status: JobStatus } {
+  const prompt = input.prompt?.trim();
+  if (!prompt) throw new Error('claude_code prompt is required');
+
+  const payload: ClaudeToolInput = { prompt };
+  if (input.working_directory && input.working_directory.trim()) {
+    payload.working_directory = input.working_directory.trim();
+  }
+
+  const requestExcerpt = buildRequestExcerpt(prompt);
+  const info = stmtInsertJob.run(
+    chatId,
+    'claude_code',
+    'queued',
+    JSON.stringify(payload),
+    requestExcerpt
+  );
+  const jobId = Number(info.lastInsertRowid);
+
+  void processJobQueue();
+  return { job_id: jobId, status: 'queued' };
+}
+
+async function processJobQueue(): Promise<void> {
+  if (jobRunnerActive) return;
+  jobRunnerActive = true;
+
+  try {
+    while (true) {
+      const job = stmtSelectNextQueuedJob.get();
+      if (!job) break;
+
+      const startedAt = new Date().toISOString();
+      stmtMarkJobRunning.run('running', startedAt, job.id);
+      let notificationText = '';
+
+      try {
+        const parsed = JSON.parse(job.input_json) as ClaudeToolInput;
+        if (!parsed?.prompt || typeof parsed.prompt !== 'string') {
+          throw new Error('Job payload missing claude_code prompt');
+        }
+
+        const resultText = await runClaudeCodeProcess(parsed);
+        const storedResult = truncateText(resultText, JOB_RESULT_MAX_CHARS);
+        const finishedAt = new Date().toISOString();
+
+        stmtMarkJobSucceeded.run('succeeded', storedResult, finishedAt, job.id);
+
+        const header = `[Background job #${job.id} completed | kind=${job.kind} | original request: ${job.request_excerpt}]`;
+        const completionBody = `${header}\n\n${storedResult}`;
+        saveMessage(job.chat_id, 'assistant', completionBody);
+        notificationText = `✅ Job #${job.id} completed\n\n${storedResult}`;
+      } catch (err: unknown) {
+        const errorText = truncateText(errMsg(err), JOB_ERROR_MAX_CHARS);
+        const finishedAt = new Date().toISOString();
+        stmtMarkJobFailed.run('failed', errorText, finishedAt, job.id);
+
+        const header = `[Background job #${job.id} failed | kind=${job.kind} | original request: ${job.request_excerpt}]`;
+        const failureBody = `${header}\n\n${errorText}`;
+        saveMessage(job.chat_id, 'assistant', failureBody);
+        notificationText = `❌ Job #${job.id} failed\n\n${errorText}`;
+      }
+
+      if (notificationText) {
+        try {
+          await sendMessageChunks(job.chat_id, notificationText);
+        } catch (notifyErr: unknown) {
+          console.error(`[job] Notification failed for #${job.id}: ${errMsg(notifyErr)}`);
+        }
+      }
+    }
+  } finally {
+    jobRunnerActive = false;
+  }
 }
 
 // ── Tool Definitions ──────────────────────────────────────────────────
@@ -369,39 +700,17 @@ async function executeTool(name: string, input: Record<string, unknown>, chatId:
       }
 
       case 'claude_code': {
-        const { prompt, working_directory } = input as { prompt: string; working_directory?: string };
-        const cwd = working_directory ? path.resolve(working_directory) : workspaceDir;
-        try {
-          const escaped = prompt.replace(/'/g, "'\\''");
-          const output = execSync(`claude -p '${escaped}' --verbose --output-format stream-json`, {
-            cwd,
-            timeout: 300_000,
-            maxBuffer: 10 * 1024 * 1024,
-            encoding: 'utf-8',
-            env: { ...process.env, PATH: `${process.env.HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:${process.env.PATH}` },
-          });
-          // Parse stream-json: each line is a JSON object, extract result text from the last "result" message
-          const lines = output.trim().split('\n');
-          let resultText = '';
-          for (const line of lines) {
-            try {
-              const obj = JSON.parse(line);
-              if (obj.type === 'result' && obj.result) {
-                resultText = obj.result;
-              } else if (obj.type === 'assistant' && obj.message?.content) {
-                for (const block of obj.message.content) {
-                  if (block.type === 'text') {
-                    resultText = block.text;
-                  }
-                }
-              }
-            } catch {}
-          }
-          return { result: resultText || output.slice(-5_000) };
-        } catch (err) {
-          const e = err as ExecError;
-          return { result: `Claude Code error: ${(e.stderr || e.message || '').slice(0, 5_000)}` };
-        }
+        const raw = input as Record<string, unknown>;
+        const job = enqueueClaudeCodeJob(chatId, {
+          prompt: typeof raw.prompt === 'string' ? raw.prompt : '',
+          working_directory: typeof raw.working_directory === 'string' ? raw.working_directory : undefined,
+        });
+        return {
+          job_started: true,
+          job_id: job.job_id,
+          status: job.status,
+          note: 'Background Claude Code job started; results will be posted when complete.',
+        };
       }
 
       case 'schedule_task': {
@@ -656,32 +965,28 @@ bot.on('message', async (msg) => {
     const caption = msg.caption || "What's in this image?";
 
     bot.sendChatAction(msg.chat.id, 'typing').catch(() => {});
+    enqueueChatTask(chatId, async () => {
+      try {
+        const { base64, mime, ext } = await downloadTelegramPhoto(photo.file_id);
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const filename = `${timestamp}-${photo.file_unique_id}.${ext}`;
+        const imagesDir = path.join(workspaceDir, 'images');
+        fs.mkdirSync(imagesDir, { recursive: true });
+        fs.writeFileSync(path.join(imagesDir, filename), Buffer.from(base64, 'base64'));
 
-    try {
-      const { base64, mime, ext } = await downloadTelegramPhoto(photo.file_id);
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const filename = `${timestamp}-${photo.file_unique_id}.${ext}`;
-      const imagesDir = path.join(workspaceDir, 'images');
-      fs.mkdirSync(imagesDir, { recursive: true });
-      fs.writeFileSync(path.join(imagesDir, filename), Buffer.from(base64, 'base64'));
+        const contentBlocks: Anthropic.ContentBlockParam[] = [
+          { type: 'image', source: { type: 'base64', media_type: mime, data: base64 } },
+          { type: 'text', text: caption },
+        ];
+        const saveAs = `[Image: workspace/images/${filename}] ${caption}`;
 
-      const contentBlocks: Anthropic.ContentBlockParam[] = [
-        { type: 'image', source: { type: 'base64', media_type: mime, data: base64 } },
-        { type: 'text', text: caption },
-      ];
-      const saveAs = `[Image: workspace/images/${filename}] ${caption}`;
-
-      const response = await runAgentLoop(chatId, contentBlocks, saveAs);
-      const chunks = splitMessage(response);
-      for (const chunk of chunks) {
-        await bot.sendMessage(msg.chat.id, chunk, { parse_mode: 'Markdown' }).catch(() =>
-          bot.sendMessage(msg.chat.id, chunk)
-        );
+        const response = await runAgentLoop(chatId, contentBlocks, saveAs);
+        await sendMessageChunks(chatId, response, 'Markdown');
+      } catch (err: unknown) {
+        console.error('[error] photo handling:', err);
+        await bot.sendMessage(msg.chat.id, `❌ Error processing image: ${errMsg(err)}`);
       }
-    } catch (err: unknown) {
-      console.error('[error] photo handling:', err);
-      await bot.sendMessage(msg.chat.id, `❌ Error processing image: ${errMsg(err)}`);
-    }
+    });
     return;
   }
 
@@ -703,6 +1008,55 @@ bot.on('message', async (msg) => {
     }
     const lines = tasks.map((t) => `${t.enabled ? '✅' : '❌'} #${t.id} ${t.name} — \`${t.cron_expression}\`\nNext: ${t.next_run || 'N/A'}`);
     await bot.sendMessage(msg.chat.id, lines.join('\n\n'), { parse_mode: 'Markdown' });
+    return;
+  }
+
+  if (text === '/jobs') {
+    const jobs = stmtListJobsByChat.all(chatId);
+    if (jobs.length === 0) {
+      await bot.sendMessage(msg.chat.id, 'No background jobs yet.');
+      return;
+    }
+
+    const lines = jobs.map((job) =>
+      `${statusEmoji(job.status)} #${job.id} ${job.kind} (${job.status})\nCreated: ${job.created_at}${job.finished_at ? `\nFinished: ${job.finished_at}` : ''}\nRequest: ${job.request_excerpt}`
+    );
+    await bot.sendMessage(msg.chat.id, lines.join('\n\n'));
+    return;
+  }
+
+  if (text.startsWith('/job ')) {
+    const idText = text.slice(5).trim();
+    if (!/^\d+$/.test(idText)) {
+      await bot.sendMessage(msg.chat.id, 'Usage: /job <id>');
+      return;
+    }
+
+    const job = stmtGetJobByIdAndChat.get(Number(idText), chatId);
+    if (!job) {
+      await bot.sendMessage(msg.chat.id, `No job #${idText} found for this chat.`);
+      return;
+    }
+
+    let details = '';
+    if (job.status === 'succeeded') {
+      details = job.result_text || '(No result stored)';
+    } else if (job.status === 'failed') {
+      details = job.error_text || '(No error details stored)';
+    } else {
+      details = 'Job is still in progress.';
+    }
+
+    const message = [
+      `${statusEmoji(job.status)} #${job.id} ${job.kind} (${job.status})`,
+      `Created: ${job.created_at}`,
+      `Started: ${job.started_at || 'N/A'}`,
+      `Finished: ${job.finished_at || 'N/A'}`,
+      `Original request: ${job.request_excerpt}`,
+      details,
+    ].join('\n\n');
+
+    await sendMessageChunks(chatId, message);
     return;
   }
 
@@ -747,55 +1101,52 @@ bot.on('message', async (msg) => {
   // Regular message — run agent loop
   bot.sendChatAction(msg.chat.id, 'typing').catch(() => {});
 
-  try {
-    const response = await runAgentLoop(chatId, text);
-    const chunks = splitMessage(response);
-    for (const chunk of chunks) {
-      await bot.sendMessage(msg.chat.id, chunk, { parse_mode: 'Markdown' }).catch(() =>
-        // Fallback: send without markdown if parsing fails
-        bot.sendMessage(msg.chat.id, chunk)
-      );
+  enqueueChatTask(chatId, async () => {
+    try {
+      const response = await runAgentLoop(chatId, text);
+      await sendMessageChunks(chatId, response, 'Markdown');
+    } catch (err: unknown) {
+      console.error('[error]', err);
+      await bot.sendMessage(msg.chat.id, `❌ Error: ${errMsg(err)}`);
     }
-  } catch (err: unknown) {
-    console.error('[error]', err);
-    await bot.sendMessage(msg.chat.id, `❌ Error: ${errMsg(err)}`);
-  }
+  });
 });
 
 // ── Scheduler ─────────────────────────────────────────────────────────
 
-const schedulerInterval = setInterval(async () => {
-  const now = new Date();
+const schedulerInterval = setInterval(() => {
+  const nowIso = new Date().toISOString();
   const dueTasks = db.prepare<[string], ScheduledTaskRow>(
     'SELECT * FROM scheduled_tasks WHERE enabled = 1 AND next_run <= ?'
-  ).all(now.toISOString());
+  ).all(nowIso);
 
   for (const task of dueTasks) {
-    try {
-      console.log(`[scheduler] Running task: ${task.name}`);
-      const response = await runAgentLoop(task.chat_id, task.prompt);
-      const chunks = splitMessage(`📋 *${task.name}*\n\n${response}`);
-      for (const chunk of chunks) {
-        await bot.sendMessage(Number(task.chat_id), chunk, { parse_mode: 'Markdown' }).catch(() =>
-          bot.sendMessage(Number(task.chat_id), chunk)
-        );
-      }
-    } catch (err: unknown) {
-      console.error(`[scheduler] Task "${task.name}" failed:`, err);
-      await bot.sendMessage(Number(task.chat_id), `❌ Scheduled task "${task.name}" failed: ${errMsg(err)}`).catch(() => {});
-    }
-
     const nextRun = getNextCronRun(task.cron_expression);
-    db.prepare('UPDATE scheduled_tasks SET last_run = ?, next_run = ? WHERE id = ?')
-      .run(now.toISOString(), nextRun.toISOString(), task.id);
+    stmtUpdateTaskRun.run(nowIso, nextRun.toISOString(), task.id);
+
+    enqueueChatTask(task.chat_id, async () => {
+      try {
+        console.log(`[scheduler] Running task: ${task.name}`);
+        const response = await runAgentLoop(task.chat_id, task.prompt);
+        await sendMessageChunks(task.chat_id, `📋 *${task.name}*\n\n${response}`, 'Markdown');
+      } catch (err: unknown) {
+        console.error(`[scheduler] Task "${task.name}" failed:`, err);
+        await bot.sendMessage(Number(task.chat_id), `❌ Scheduled task "${task.name}" failed: ${errMsg(err)}`).catch(() => {});
+      }
+    });
   }
 }, 60_000);
+
+const jobWatchdogInterval = setInterval(() => {
+  void processJobQueue();
+}, 30_000);
 
 // ── Graceful Shutdown ─────────────────────────────────────────────────
 
 function shutdown(signal: string): void {
   console.log(`\n[shutdown] Received ${signal}, shutting down...`);
   clearInterval(schedulerInterval);
+  clearInterval(jobWatchdogInterval);
   bot.stopPolling();
   db.close();
   console.log('[shutdown] Done.');
@@ -807,6 +1158,7 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 
 // ── Startup ───────────────────────────────────────────────────────────
 
+void processJobQueue();
 console.log('🤖 Minion is running');
 console.log(`   Model: ${CONFIG.MODEL}`);
 console.log(`   Workspace: ${workspaceDir}`);
