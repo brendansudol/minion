@@ -13,3 +13,4 @@
 ## Preferences
 
 ## Important Context
+- Brendan lives in Asheville, NC
