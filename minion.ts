@@ -80,11 +80,23 @@ const workspaceDir = path.resolve(CONFIG.WORKSPACE_DIR);
 fs.mkdirSync(workspaceDir, { recursive: true });
 
 function loadSystemPrompt(): string {
+  let prompt: string;
   try {
-    return fs.readFileSync(CONFIG.SYSTEM_PROMPT_FILE, 'utf-8');
+    prompt = fs.readFileSync(CONFIG.SYSTEM_PROMPT_FILE, 'utf-8');
   } catch {
-    return 'You are Minion, a personal AI assistant running on a Mac Mini. Be concise and helpful.';
+    prompt = 'You are Minion, a personal AI assistant running on a Mac Mini. Be concise and helpful.';
   }
+
+  try {
+    const memory = fs.readFileSync(path.resolve(CONFIG.MEMORY_FILE), 'utf-8').trim();
+    if (memory) {
+      prompt += `\n\n---\n\n## Memory\n\nThe following is your persistent memory — durable facts, preferences, and guardrails. Refer to it as needed.\n\n${memory}`;
+    }
+  } catch {
+    // No memory file yet — that's fine
+  }
+
+  return prompt;
 }
 
 function resolvePath(p: string): string {
