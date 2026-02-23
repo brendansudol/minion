@@ -64,10 +64,10 @@ minion/
 ├── tsconfig.json
 ├── .gitignore
 ├── prompts/
-│   ├── SYSTEM_PROMPT.md # Editable system prompt (agent personality)
-│   └── MEMORY.md        # Persistent memory the agent reads/writes
+│   └── SYSTEM_PROMPT.md # Editable system prompt (agent personality)
 ├── data/
-│   └── minion.db        # SQLite database (auto-created)
+│   ├── minion.db        # SQLite database (auto-created)
+│   └── MEMORY.md        # Persistent memory the agent reads/writes (local only)
 ├── workspace/           # Working directory for agent file operations
 └── logs/                # stdout/stderr when running via launchd
 ```
@@ -168,7 +168,7 @@ Other constants in `config.ts`:
 | `OPUS_MODEL`          | `claude-opus-4-6`            | Model for think_hard                  |
 | `MAX_TOOL_ITERATIONS` | `25`                         | Safety cap on agent loop iterations   |
 | `WORKSPACE_DIR`       | `./workspace`                | Working directory for file operations |
-| `MEMORY_FILE`         | `./prompts/MEMORY.md`        | Path to persistent memory             |
+| `MEMORY_FILE`         | `./data/MEMORY.md`           | Path to persistent memory             |
 | `DB_PATH`             | `./data/minion.db`           | SQLite database path                  |
 | `SYSTEM_PROMPT_FILE`  | `./prompts/SYSTEM_PROMPT.md` | System prompt file path               |
 
