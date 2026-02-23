@@ -3,7 +3,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import Database from 'better-sqlite3';
 import TelegramBot from 'node-telegram-bot-api';
 import { CronExpressionParser } from 'cron-parser';
-import { execSync } from 'child_process';
+import { execSync, spawn, ChildProcess } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { CONFIG } from './config.js';
@@ -371,37 +371,14 @@ async function executeTool(name: string, input: Record<string, unknown>, chatId:
       case 'claude_code': {
         const { prompt, working_directory } = input as { prompt: string; working_directory?: string };
         const cwd = working_directory ? path.resolve(working_directory) : workspaceDir;
-        try {
-          const escaped = prompt.replace(/'/g, "'\\''");
-          const output = execSync(`claude -p '${escaped}' --verbose --output-format stream-json`, {
-            cwd,
-            timeout: 300_000,
-            maxBuffer: 10 * 1024 * 1024,
-            encoding: 'utf-8',
-            env: { ...process.env, PATH: `${process.env.HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:${process.env.PATH}` },
-          });
-          // Parse stream-json: each line is a JSON object, extract result text from the last "result" message
-          const lines = output.trim().split('\n');
-          let resultText = '';
-          for (const line of lines) {
-            try {
-              const obj = JSON.parse(line);
-              if (obj.type === 'result' && obj.result) {
-                resultText = obj.result;
-              } else if (obj.type === 'assistant' && obj.message?.content) {
-                for (const block of obj.message.content) {
-                  if (block.type === 'text') {
-                    resultText = block.text;
-                  }
-                }
-              }
-            } catch {}
-          }
-          return { result: resultText || output.slice(-5_000) };
-        } catch (err) {
-          const e = err as ExecError;
-          return { result: `Claude Code error: ${(e.stderr || e.message || '').slice(0, 5_000)}` };
-        }
+        const jobId = nextJobId++;
+
+        bot.sendMessage(Number(chatId), `⏳ Running Claude Code job #${jobId}...`).catch(() => {});
+
+        // Fire and forget — result will be posted when complete
+        runClaudeCodeAsync(jobId, chatId, prompt, cwd).catch(err => console.error(`[job#${jobId}]`, err));
+
+        return { job_started: true, job_id: jobId, note: 'Background job started; results posted when complete.' };
       }
 
       case 'schedule_task': {
@@ -643,6 +620,111 @@ async function callWithRetry<T>(fn: () => Promise<T>, retries = 3): Promise<T> {
 const startTime = Date.now();
 let currentModel: string = CONFIG.MODEL;
 
+// ── Background Jobs & Chat Queue ──────────────────────────────────────
+
+let nextJobId = 1;
+const activeJobs = new Map<number, { chatId: string; excerpt: string; process: ChildProcess }>();
+const chatQueues = new Map<string, Promise<void>>();
+
+function enqueueChatTask(chatId: string, task: () => Promise<void>): void {
+  const prior = chatQueues.get(chatId) || Promise.resolve();
+  const chain = prior.then(task).catch(err => console.error('[queue]', err));
+  chatQueues.set(chatId, chain);
+  chain.then(() => { if (chatQueues.get(chatId) === chain) chatQueues.delete(chatId); });
+}
+
+async function sendChatMessage(chatId: string, text: string): Promise<void> {
+  const chunks = splitMessage(text);
+  for (const chunk of chunks) {
+    await bot.sendMessage(Number(chatId), chunk, { parse_mode: 'Markdown' }).catch(() =>
+      bot.sendMessage(Number(chatId), chunk)
+    );
+  }
+}
+
+function parseStreamJsonLine(line: string, acc: { resultText: string }): void {
+  try {
+    const obj = JSON.parse(line);
+    if (obj.type === 'result' && obj.result) {
+      acc.resultText = obj.result;
+    } else if (obj.type === 'assistant' && obj.message?.content) {
+      for (const block of obj.message.content) {
+        if (block.type === 'text') acc.resultText = block.text;
+      }
+    }
+  } catch {}
+}
+
+async function runClaudeCodeAsync(jobId: number, chatId: string, prompt: string, cwd: string): Promise<void> {
+  const excerpt = prompt.slice(0, 200);
+  const child = spawn('claude', ['-p', prompt, '--verbose', '--output-format', 'stream-json'], {
+    cwd,
+    env: { ...process.env, PATH: `${process.env.HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:${process.env.PATH}` },
+  });
+
+  activeJobs.set(jobId, { chatId, excerpt, process: child });
+
+  let stdoutTail = '';
+  let stderrTail = '';
+  let remainder = '';
+  let timedOut = false;
+  const acc = { resultText: '' };
+
+  const timer = setTimeout(() => {
+    timedOut = true;
+    child.kill();
+  }, 300_000);
+
+  child.stdout.on('data', (chunk: Buffer) => {
+    const str = chunk.toString();
+    stdoutTail += str;
+    if (stdoutTail.length > 50_000) stdoutTail = stdoutTail.slice(-50_000);
+    remainder += str;
+    const lines = remainder.split('\n');
+    remainder = lines.pop()!;
+    for (const line of lines) {
+      if (line.trim()) parseStreamJsonLine(line, acc);
+    }
+  });
+
+  child.stderr.on('data', (chunk: Buffer) => {
+    stderrTail += chunk.toString();
+    if (stderrTail.length > 10_000) stderrTail = stderrTail.slice(-10_000);
+  });
+
+  try {
+    const exitCode = await new Promise<number | null>((resolve, reject) => {
+      let settled = false;
+      child.on('close', (code) => { if (!settled) { settled = true; resolve(code); } });
+      child.on('error', (err) => { if (!settled) { settled = true; reject(err); } });
+    });
+
+    clearTimeout(timer);
+
+    if (remainder.trim()) parseStreamJsonLine(remainder, acc);
+
+    let message: string;
+    if (timedOut) {
+      message = `[Background job #${jobId} timed out | claude_code | request: ${excerpt}]\n\nJob killed after 5-minute timeout.`;
+    } else if (exitCode !== 0 && !acc.resultText) {
+      message = `[Background job #${jobId} failed | claude_code | request: ${excerpt}]\n\n${stderrTail || 'Unknown error (exit code ' + exitCode + ')'}`;
+    } else {
+      const result = acc.resultText || stdoutTail.slice(-5_000);
+      message = `[Background job #${jobId} completed | claude_code | request: ${excerpt}]\n\n${result}`;
+    }
+
+    saveMessage(chatId, 'assistant', message);
+    await sendChatMessage(chatId, message);
+  } catch (err) {
+    clearTimeout(timer);
+    const message = `[Background job #${jobId} failed | claude_code | request: ${excerpt}]\n\n${errMsg(err)}`;
+    saveMessage(chatId, 'assistant', message);
+    await sendChatMessage(chatId, message);
+  } finally {
+    activeJobs.delete(jobId);
+  }
+}
+
 // ── Telegram Commands & Messages ──────────────────────────────────────
 
 bot.on('message', async (msg) => {
@@ -655,33 +737,30 @@ bot.on('message', async (msg) => {
     const photo = msg.photo[msg.photo.length - 1]; // largest resolution
     const caption = msg.caption || "What's in this image?";
 
-    bot.sendChatAction(msg.chat.id, 'typing').catch(() => {});
+    enqueueChatTask(chatId, async () => {
+      bot.sendChatAction(msg.chat.id, 'typing').catch(() => {});
 
-    try {
-      const { base64, mime, ext } = await downloadTelegramPhoto(photo.file_id);
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const filename = `${timestamp}-${photo.file_unique_id}.${ext}`;
-      const imagesDir = path.join(workspaceDir, 'images');
-      fs.mkdirSync(imagesDir, { recursive: true });
-      fs.writeFileSync(path.join(imagesDir, filename), Buffer.from(base64, 'base64'));
+      try {
+        const { base64, mime, ext } = await downloadTelegramPhoto(photo.file_id);
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const filename = `${timestamp}-${photo.file_unique_id}.${ext}`;
+        const imagesDir = path.join(workspaceDir, 'images');
+        fs.mkdirSync(imagesDir, { recursive: true });
+        fs.writeFileSync(path.join(imagesDir, filename), Buffer.from(base64, 'base64'));
 
-      const contentBlocks: Anthropic.ContentBlockParam[] = [
-        { type: 'image', source: { type: 'base64', media_type: mime, data: base64 } },
-        { type: 'text', text: caption },
-      ];
-      const saveAs = `[Image: workspace/images/${filename}] ${caption}`;
+        const contentBlocks: Anthropic.ContentBlockParam[] = [
+          { type: 'image', source: { type: 'base64', media_type: mime, data: base64 } },
+          { type: 'text', text: caption },
+        ];
+        const saveAs = `[Image: workspace/images/${filename}] ${caption}`;
 
-      const response = await runAgentLoop(chatId, contentBlocks, saveAs);
-      const chunks = splitMessage(response);
-      for (const chunk of chunks) {
-        await bot.sendMessage(msg.chat.id, chunk, { parse_mode: 'Markdown' }).catch(() =>
-          bot.sendMessage(msg.chat.id, chunk)
-        );
+        const response = await runAgentLoop(chatId, contentBlocks, saveAs);
+        await sendChatMessage(chatId, response);
+      } catch (err: unknown) {
+        console.error('[error] photo handling:', err);
+        await bot.sendMessage(msg.chat.id, `❌ Error processing image: ${errMsg(err)}`);
       }
-    } catch (err: unknown) {
-      console.error('[error] photo handling:', err);
-      await bot.sendMessage(msg.chat.id, `❌ Error processing image: ${errMsg(err)}`);
-    }
+    });
     return;
   }
 
@@ -745,21 +824,17 @@ bot.on('message', async (msg) => {
   }
 
   // Regular message — run agent loop
-  bot.sendChatAction(msg.chat.id, 'typing').catch(() => {});
+  enqueueChatTask(chatId, async () => {
+    bot.sendChatAction(msg.chat.id, 'typing').catch(() => {});
 
-  try {
-    const response = await runAgentLoop(chatId, text);
-    const chunks = splitMessage(response);
-    for (const chunk of chunks) {
-      await bot.sendMessage(msg.chat.id, chunk, { parse_mode: 'Markdown' }).catch(() =>
-        // Fallback: send without markdown if parsing fails
-        bot.sendMessage(msg.chat.id, chunk)
-      );
+    try {
+      const response = await runAgentLoop(chatId, text);
+      await sendChatMessage(chatId, response);
+    } catch (err: unknown) {
+      console.error('[error]', err);
+      await bot.sendMessage(msg.chat.id, `❌ Error: ${errMsg(err)}`);
     }
-  } catch (err: unknown) {
-    console.error('[error]', err);
-    await bot.sendMessage(msg.chat.id, `❌ Error: ${errMsg(err)}`);
-  }
+  });
 });
 
 // ── Scheduler ─────────────────────────────────────────────────────────
@@ -771,23 +846,21 @@ const schedulerInterval = setInterval(async () => {
   ).all(now.toISOString());
 
   for (const task of dueTasks) {
-    try {
-      console.log(`[scheduler] Running task: ${task.name}`);
-      const response = await runAgentLoop(task.chat_id, task.prompt);
-      const chunks = splitMessage(`📋 *${task.name}*\n\n${response}`);
-      for (const chunk of chunks) {
-        await bot.sendMessage(Number(task.chat_id), chunk, { parse_mode: 'Markdown' }).catch(() =>
-          bot.sendMessage(Number(task.chat_id), chunk)
-        );
-      }
-    } catch (err: unknown) {
-      console.error(`[scheduler] Task "${task.name}" failed:`, err);
-      await bot.sendMessage(Number(task.chat_id), `❌ Scheduled task "${task.name}" failed: ${errMsg(err)}`).catch(() => {});
-    }
-
+    // Claim-first: advance next_run before enqueueing to prevent duplicate runs
     const nextRun = getNextCronRun(task.cron_expression);
     db.prepare('UPDATE scheduled_tasks SET last_run = ?, next_run = ? WHERE id = ?')
       .run(now.toISOString(), nextRun.toISOString(), task.id);
+
+    enqueueChatTask(task.chat_id, async () => {
+      try {
+        console.log(`[scheduler] Running task: ${task.name}`);
+        const response = await runAgentLoop(task.chat_id, task.prompt);
+        await sendChatMessage(task.chat_id, `📋 *${task.name}*\n\n${response}`);
+      } catch (err: unknown) {
+        console.error(`[scheduler] Task "${task.name}" failed:`, err);
+        await bot.sendMessage(Number(task.chat_id), `❌ Scheduled task "${task.name}" failed: ${errMsg(err)}`).catch(() => {});
+      }
+    });
   }
 }, 60_000);
 
@@ -795,6 +868,11 @@ const schedulerInterval = setInterval(async () => {
 
 function shutdown(signal: string): void {
   console.log(`\n[shutdown] Received ${signal}, shutting down...`);
+  for (const [jobId, job] of activeJobs) {
+    console.log(`[shutdown] Killing background job #${jobId}`);
+    job.process.kill();
+  }
+  activeJobs.clear();
   clearInterval(schedulerInterval);
   bot.stopPolling();
   db.close();
