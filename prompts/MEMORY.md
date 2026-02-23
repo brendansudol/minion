@@ -14,3 +14,8 @@
 
 ## Important Context
 - Brendan lives in Asheville, NC
+
+
+## Timezone
+- Brendan is in Asheville, NC — Eastern Time (ET)
+- Always convert UTC timestamps to Eastern when displaying dates/times to him
