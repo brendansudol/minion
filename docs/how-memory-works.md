@@ -1,39 +1,46 @@
 # How Memory Works
 
-*As of: February 2026*
+*Updated: February 2026*
 
 ## Overview
 
-The agent has a persistent memory file (`prompts/MEMORY.md`) that it can read and write to across conversations. This is entirely self-directed — the agent decides when to read, what's worth remembering, and how to structure the file.
+The agent has a persistent memory file (`data/MEMORY.md`) that stores durable facts, preferences, and guardrails. Memory is automatically injected into the system prompt on every API call, so the agent always has it in context. The agent can update memory via tool calls when it learns something new.
+
+The file is gitignored (lives in `data/` alongside the SQLite database) since it contains personal information.
+
+## Auto-Injection
+
+`loadSystemPrompt()` reads MEMORY.md and appends it to the system prompt each turn. The memory is wrapped with a heading and brief framing so the agent knows what it is. This guarantees memory is always available without the agent spending a tool call to read it.
 
 ## Tools
 
-**`memory_read`** — Reads the full contents of MEMORY.md and returns it. No parameters.
+**`memory_read`** — Reads the full contents of MEMORY.md and returns it. Rarely needed since memory is auto-injected, but still available.
 
 **`memory_update`** — Two modes:
 - `append` — Adds content to the end of the file
 - `rewrite` — Replaces the entire file with new content
 
-## How It Gets Used
+## What Goes in Memory
 
-1. The system prompt instructs the agent to "check your MEMORY.md at the start of conversations for relevant context"
-2. The agent calls `memory_read` as a tool use (costs one iteration of the agent loop)
-3. The system prompt also instructs the agent to "update MEMORY.md when you learn important new facts about Brendan or ongoing projects"
-4. The agent calls `memory_update` when it decides something is worth persisting
+The file has a self-documented rule at the top: only store info that will still matter in ~3+ months AND changes behavior. Current sections:
 
-There is no automatic injection — memory is not included in the system prompt or prepended to messages. The agent must actively choose to read it via a tool call each time.
+- **About Me** — Name, location, timezone, family, interests
+- **Interaction Preferences** — Communication style, engineering preferences, tone
+- **Safety + Guardrails** — Secrets policy, shell command rules, file write policy
+- **Machine / Runtime** — Mac Mini setup and agent capabilities
+- **Memory Management Policy** — Rules for what to store and how to maintain the file
+
+Operational instructions that the system prompt already covers (e.g., how to use tools, agent behavior defaults) belong in `SYSTEM_PROMPT.md`, not in memory.
 
 ## Current Limitations
 
-- **No guarantee of reading**: The instruction to check memory at conversation start is advisory, not enforced. The agent may skip it to save a tool call iteration.
 - **No structured schema**: The file format is free-form markdown managed by the agent. It could append duplicates, let the file grow unwieldy, or lose structure over time.
-- **Full file rewrites**: The `rewrite` mode replaces the entire file, which is risky if the agent hallucinates or forgets existing content it hasn't re-read recently.
-- **No size management**: There's no cap on file size. As memory grows, it could become expensive to include in context.
+- **Full file rewrites**: The `rewrite` mode replaces the entire file, which is risky if the agent hallucinates or forgets existing content.
+- **No size management**: There's no cap on file size. As memory grows, it adds more input tokens to every API call.
 - **Single file**: All memory lives in one file — no separation between facts, preferences, project context, etc.
 
 ## Ideas for Future Improvements
 
-- **Auto-inject into system prompt**: Read MEMORY.md at the start of each `runAgentLoop` call and append it to the system prompt. This guarantees memory is always available without burning a tool call, at the cost of extra input tokens.
 - **Structured sections with timestamps**: Enforce a schema (e.g., YAML frontmatter or defined markdown sections) so the agent updates specific sections rather than doing full rewrites. Include "last updated" dates per section so stale info is visible.
 - **Size limits and summarization**: Cap the file at a certain size (e.g., 4K chars). When it exceeds the limit, ask the agent to summarize/condense before appending more. Or automatically truncate the oldest entries.
 - **Semantic memory with embeddings**: Replace the flat file with a vector store. The agent writes memory entries, and at conversation start, relevant memories are retrieved based on the current message. More scalable but adds complexity.
