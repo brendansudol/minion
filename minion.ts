@@ -1,3 +1,4 @@
+import './logging.js';
 import 'dotenv/config';
 import Anthropic from '@anthropic-ai/sdk';
 import Database from 'better-sqlite3';
