@@ -75,6 +75,15 @@ function errMsg(err: unknown): string {
 const anthropic = new Anthropic({ apiKey: CONFIG.ANTHROPIC_API_KEY });
 const bot = new TelegramBot(CONFIG.TELEGRAM_BOT_TOKEN, { polling: true });
 
+bot.on('polling_error', (err: unknown) => {
+  const message = errMsg(err);
+  if (/\b(ECONNRESET|ETIMEDOUT|ESOCKETTIMEDOUT)\b|socket hang up/i.test(message)) {
+    console.log(`[polling] transient Telegram polling error: ${message}`);
+    return;
+  }
+  console.error('[polling] Telegram polling error:', err);
+});
+
 // ── Helpers ───────────────────────────────────────────────────────────
 
 const workspaceDir = path.resolve(CONFIG.WORKSPACE_DIR);

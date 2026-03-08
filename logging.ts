@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { format } from 'util';
 
 const logsDir = path.join(path.dirname(new URL(import.meta.url).pathname), 'logs');
 fs.mkdirSync(logsDir, { recursive: true });
@@ -11,15 +12,7 @@ const origLog = console.log.bind(console);
 const origErr = console.error.bind(console);
 
 function fmt(args: unknown[]): string {
-  return args
-    .map((a) =>
-      a instanceof Error
-        ? a.stack || a.message
-        : typeof a === 'string'
-          ? a
-          : JSON.stringify(a),
-    )
-    .join(' ');
+  return format(...args);
 }
 
 console.log = (...args: unknown[]) => {
