@@ -69,7 +69,7 @@ minion/
 │   ├── minion.db        # SQLite database (auto-created)
 │   └── MEMORY.md        # Persistent memory the agent reads/writes (local only)
 ├── workspace/           # Working directory for agent file operations
-└── logs/                # stdout/stderr when running via launchd
+└── logs/                # app file logs (launchd stdout/stderr go to ~/Library/Logs/minion/)
 ```
 
 ## Tools
@@ -176,8 +176,11 @@ Other constants in `config.ts`:
 
 For persistent operation on a Mac Mini, create a launchd plist:
 
+Secrets come from `.env` (loaded by dotenv at startup), so the plist doesn't need them. The log files must live **outside** `~/Documents` — macOS TCC privacy protection blocks launchd from opening files there, and the job dies with `EX_CONFIG` (exit 78) before the app even starts. The app itself can still read the project directory fine.
+
 ```bash
 # Create the plist
+mkdir -p ~/Library/Logs/minion
 cat > ~/Library/LaunchAgents/com.minion.plist << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -187,8 +190,8 @@ cat > ~/Library/LaunchAgents/com.minion.plist << 'EOF'
     <string>com.minion</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/opt/homebrew/bin/npx</string>
-        <string>tsx</string>
+        <string>/opt/homebrew/bin/node</string>
+        <string>/Users/brendansudol/Documents/code/minion/node_modules/.bin/tsx</string>
         <string>minion.ts</string>
     </array>
     <key>WorkingDirectory</key>
@@ -196,40 +199,37 @@ cat > ~/Library/LaunchAgents/com.minion.plist << 'EOF'
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-        <key>ANTHROPIC_API_KEY</key>
-        <string>YOUR_KEY_HERE</string>
-        <key>TELEGRAM_BOT_TOKEN</key>
-        <string>YOUR_TOKEN_HERE</string>
-        <key>TELEGRAM_USER_ID</key>
-        <string>YOUR_ID_HERE</string>
+        <string>/Users/brendansudol/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/Users/brendansudol/Documents/code/minion/logs/stdout.log</string>
+    <string>/Users/brendansudol/Library/Logs/minion/stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/brendansudol/Documents/code/minion/logs/stderr.log</string>
+    <string>/Users/brendansudol/Library/Logs/minion/stderr.log</string>
 </dict>
 </plist>
 EOF
 
 # Load it
-launchctl load ~/Library/LaunchAgents/com.minion.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.minion.plist
 
-# Check status
+# Check status (PID and last exit code)
 launchctl list | grep minion
 
 # Restart
 launchctl kickstart -k gui/$(id -u)/com.minion
 
+# Unload
+launchctl bootout gui/$(id -u)/com.minion
+
 # View logs
-tail -f ~/Documents/code/minion/logs/stdout.log
+tail -f ~/Library/Logs/minion/stdout.log
 ```
 
-Update the `ProgramArguments` path if `npx` is installed elsewhere — run `which npx` to check.
+`PATH` includes `~/.local/bin` so the `claude_code` tool can find the `claude` CLI.
 
 ## Safety
 
