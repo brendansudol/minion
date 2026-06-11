@@ -441,7 +441,9 @@ async function executeTool(name: string, input: Record<string, unknown>, chatId:
         const resp = await anthropic.messages.create({
           model: CONFIG.OPUS_MODEL,
           max_tokens: 16_000,
-          thinking: { type: 'enabled', budget_tokens: 10_000 },
+          // Opus 4.8 rejects budget_tokens; 'display' returns a reasoning summary
+          // (not yet in SDK 0.78 types, hence the cast — the API accepts it)
+          thinking: { type: 'adaptive', display: 'summarized' } as Anthropic.ThinkingConfigParam,
           messages: [{ role: 'user', content: question }],
         });
 

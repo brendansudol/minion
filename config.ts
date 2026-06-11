@@ -4,7 +4,7 @@ export const CONFIG = {
   ALLOWED_USER_ID: process.env.TELEGRAM_USER_ID!,
   X_BEARER_TOKEN: process.env.X_BEARER_TOKEN || "",
   MODEL: "claude-sonnet-4-6",
-  OPUS_MODEL: "claude-opus-4-6",
+  OPUS_MODEL: "claude-opus-4-8",
   MAX_TOOL_ITERATIONS: 25,
   WORKSPACE_DIR: "./workspace",
   MEMORY_FILE: "./data/MEMORY.md",

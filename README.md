@@ -96,7 +96,7 @@ The killer feature. Shells out to `claude -p "..." --output-format stream-json`,
 
 ### think_hard
 
-Calls Opus with extended thinking (10K budget tokens) for genuinely difficult reasoning. Expensive — the agent should only reach for this when it recognizes it needs deeper analysis.
+Calls Opus with adaptive thinking (the model decides how deeply to reason) for genuinely difficult reasoning. Expensive — the agent should only reach for this when it recognizes it needs deeper analysis.
 
 ## Telegram Commands
 
@@ -165,7 +165,7 @@ Other constants in `config.ts`:
 | Key                   | Default                      | Description                           |
 | --------------------- | ---------------------------- | ------------------------------------- |
 | `MODEL`               | `claude-sonnet-4-6`          | Default model for daily use           |
-| `OPUS_MODEL`          | `claude-opus-4-6`            | Model for think_hard                  |
+| `OPUS_MODEL`          | `claude-opus-4-8`            | Model for think_hard                  |
 | `MAX_TOOL_ITERATIONS` | `25`                         | Safety cap on agent loop iterations   |
 | `WORKSPACE_DIR`       | `./workspace`                | Working directory for file operations |
 | `MEMORY_FILE`         | `./data/MEMORY.md`           | Path to persistent memory             |
